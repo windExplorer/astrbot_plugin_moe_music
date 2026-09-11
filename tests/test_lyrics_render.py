@@ -67,3 +67,22 @@ class TestRender:
     def test_empty_lyrics_raises(self, renderer):
         with pytest.raises(ValueError):
             renderer.render("")
+
+
+class TestPlatformMetaTags:
+    """平台自定义元信息标签清理（酷我 [kuwo:x] / [ver:x] 等）。"""
+
+    def test_kuwo_tags_stripped(self):
+        lrc = "[kuwo:127]\n[ver:v1.0]\n[ti:晴天]\n[00:01.00]故事的小黄花"
+        lines = LyricsRenderer.clean_lrc(lrc)
+        assert all("kuwo" not in line and "ver:" not in line and "ti:" not in line for line in lines)
+        assert "故事的小黄花" in lines
+
+    def test_timeline_not_damaged(self):
+        lrc = "[00:12.50]从出生那年就飘着"
+        assert LyricsRenderer.clean_lrc(lrc) == ["从出生那年就飘着"]
+
+    def test_midline_meta_tag_stripped(self):
+        lrc = "[00:01.00]歌词内容[encoding:utf-8]续"
+        lines = LyricsRenderer.clean_lrc(lrc)
+        assert lines == ["歌词内容续"]

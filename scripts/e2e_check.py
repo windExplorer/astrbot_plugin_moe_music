@@ -86,8 +86,7 @@ async def main() -> int:
         print(f"    url={audio.get('url')}")
         tmp_path = await client.download(audio["url"], Path("data/tmp_e2e_download"))
         size = tmp_path.stat().st_size
-        tmp_path.unlink()
-        tmp_path.parent.rmdir()
+        tmp_path.unlink()  # 只删下载文件，目录内可能有其它产物，保留
         print(f"[7] 临时链接下载 ✓  {size} 字节（已清理）")
     except ApiError as e:
         failures.append(f"播放链接: {e.code} {e.message}")

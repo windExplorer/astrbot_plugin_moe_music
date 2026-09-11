@@ -15,8 +15,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 # LRC 时间轴 [mm:ss] / [mm:ss.xx]
 _RE_TIMELINE = re.compile(r"\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]")
-# LRC 元信息标签 [ti:...] / [ar:...] 等
-_RE_META = re.compile(r"^\[(ti|ar|al|by|offset|hash|total|kana|encoding):.*?\]\s*", re.IGNORECASE)
+# LRC 元信息标签：任意「字母开头键:值」，如 [ti:晴天] / [kuwo:127] / [ver:v1.0]
+# （键以字母/下划线开头，不会误伤数字开头的时间轴；行中出现的标签也一并清理）
+_RE_META = re.compile(r"\[[a-zA-Z_][^\]:]*:[^\]]*\]")
 # 行首残留的多个连续时间轴（部分 LRC 同行多时间轴）
 _MAX_LINES = 120
 
