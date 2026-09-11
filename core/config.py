@@ -55,6 +55,7 @@ class PluginConfig:
 
     api_base_url: str = "http://127.0.0.1:3000"
     api_key: str = ""
+    public_base_url: str = ""  # 临时链接对外可达地址（空 = 直接用后端返回的链接）
     default_source: str = "all"
     default_quality: str = "320k"
     song_limit: int = 5
@@ -77,6 +78,7 @@ class PluginConfig:
         """从 AstrBotConfig（dict 子类）读取配置并做基础校验。"""
         base_url = str(config.get("api_base_url", "") or "").strip().rstrip("/")
         api_key = str(config.get("api_key", "") or "").strip()
+        public_base_url = str(config.get("public_base_url", "") or "").strip().rstrip("/")
 
         default_source = _strip_option_label(str(config.get("default_source", "all") or "all"))
         if default_source not in SOURCE_CODES:
@@ -121,6 +123,7 @@ class PluginConfig:
         return cls(
             api_base_url=base_url,
             api_key=api_key,
+            public_base_url=public_base_url,
             default_source=default_source,
             default_quality=default_quality,
             song_limit=song_limit,

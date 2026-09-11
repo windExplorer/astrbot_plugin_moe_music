@@ -70,12 +70,14 @@ class SongSender:
             except ApiError as e:
                 logger.warning(f"[萌音点歌] 获取封面失败：code={e.code}（{track.id}）")
 
-        audio_url = audio.get("url", "")
+        audio_url_raw = audio.get("url", "")
         quality = str(audio.get("quality", self.cfg.default_quality))
+        # 发给用户的链接用对外可达地址（publicize）；插件自己下载仍走后端原地址（内网更快）
+        audio_url = self.api.publicize(audio_url_raw)
 
         for mode in self.cfg.send_modes:
             try:
-                sent = await self._dispatch(event, mode, track, audio_url, quality, cover_url)
+                sent = await self._dispatch(event, mode, track, audio_url, audio_url_raw, quality, cover_url)
             except Exception:
                 logger.error(f"[萌音点歌] 发送模式 {mode} 未捕获异常：\n{traceback.format_exc()}")
                 sent = False
@@ -152,19 +154,21 @@ class SongSender:
         mode: str,
         track: Track,
         audio_url: str,
+        audio_url_raw: str,
         quality: str,
         cover_url: str,
     ) -> bool:
+        """audio_url 为对外可达链接（发给用户的）；audio_url_raw 为后端原链接（插件自己下载用）。"""
         if mode == "card":
             return await self._send_card(event, track, audio_url, cover_url)
         if mode == "record_link":
             return await self._send_record_link(event, audio_url)
         if mode == "record_local":
-            return await self._send_record_local(event, track, audio_url, quality)
+            return await self._send_record_local(event, track, audio_url_raw, quality)
         if mode == "file_link":
             return await self._send_file_link(event, track, audio_url, quality)
         if mode == "file_local":
-            return await self._send_file_local(event, track, audio_url, quality, cover_url)
+            return await self._send_file_local(event, track, audio_url_raw, quality, cover_url)
         if mode == "text":
             return await self._send_text(event, track, audio_url)
         logger.warning(f"[萌音点歌] 未知的发送模式：{mode}")

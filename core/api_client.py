@@ -13,7 +13,7 @@
 import asyncio
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import aiofiles
 import aiohttp
@@ -85,6 +85,10 @@ class MusicApiClient:
         api_key: ``sk-`` 前缀的 API Key。
         request_timeout: 单次 HTTP 请求超时（秒）。
         proxy: 可选 HTTP 代理地址，空字符串表示直连。
+        public_base_url: 临时链接的对外可达地址（如 https://music.example.com）。
+            后端按请求 Host 拼临时链接，若本机经内网/localhost 访问后端，
+            签发的链接外部用户不可达；配置此项后发送给用户的链接会改写为该地址。
+            留空表示后端地址本身对外可达，链接原样使用。
     """
 
     def __init__(
@@ -93,11 +97,13 @@ class MusicApiClient:
         api_key: str,
         request_timeout: int = 10,
         proxy: str = "",
+        public_base_url: str = "",
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = aiohttp.ClientTimeout(total=max(5, request_timeout))
         self._proxy = proxy.strip() or None
+        self._public_base_url = public_base_url.strip().rstrip("/")
         self._session: aiohttp.ClientSession | None = None
 
         # 节流：按 Key 的 qpsLimit 推导最小请求间隔，避免自触发限流
@@ -113,6 +119,19 @@ class MusicApiClient:
     @property
     def api_root(self) -> str:
         return f"{self._base_url}/api/v1"
+
+    def publicize(self, url: str) -> str:
+        """把本站临时链接改写为对外可达地址；未配置 public_base_url 时原样返回。
+
+        仅替换 scheme/netloc（及可选的路径前缀），保留后端签发的路径与查询串，
+        因此后端即使部署在反向代理子路径下也能正确改写。
+        """
+        if not url or not self._public_base_url:
+            return url
+        pub = urlparse(self._public_base_url)
+        orig = urlparse(url)
+        path = (pub.path.rstrip("/") if pub.path else "") + (orig.path or "")
+        return urlunparse((pub.scheme or orig.scheme, pub.netloc, path, "", orig.query, ""))
 
     def _key_masked(self) -> str:
         if not self._api_key:

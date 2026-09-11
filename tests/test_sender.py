@@ -133,8 +133,10 @@ class FakeUrlBackend:
         await self.runner.cleanup()
 
 
-def make_sender(api, modes=None):
-    cfg = PluginConfig.from_astrbot_config({"send_modes": modes or ["record_link", "text"]})
+def make_sender(api, modes=None, overrides=None):
+    cfg = PluginConfig.from_astrbot_config(
+        {"send_modes": modes or ["record_link", "text"], **(overrides or {})}
+    )
     return SongSender(cfg, api, Path(__file__).parent / "_tmp_downloads")
 
 
@@ -231,3 +233,49 @@ class TestLocalFilename:
             kind, chain = event.sent[0]
             seg = chain[0]
             assert seg.name == "晴天 - 周杰伦.flac"
+
+
+class TestPublicUrlRouting:
+    """发送给用户的链接用 public_base_url，插件下载用后端原链接。"""
+
+    async def test_text_sends_public_url(self):
+        async with FakeUrlBackend([ok_url("320k")]) as api:
+            api._public_base_url = "https://music.example.com"  # 模拟 main.py 按 cfg 构造的客户端
+            sender = make_sender(api, modes=["text"])
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track())
+            assert ok
+            kind, chain = event.sent[0]
+            text = str(getattr(chain[0], "args", "") or getattr(chain[0], "text", ""))
+            assert "https://music.example.com/api/temp/t" in text
+            assert "127.0.0.1" not in text
+
+    async def test_download_uses_raw_url(self, tmp_path):
+        # file_local 需要下载：raw url 指向测试服务器，改写后的公网地址不可达
+        # 若下载误用公网地址会失败——以此证明下载走的是原链接
+        async with FakeUrlBackend([ok_url("320k")], audio_bytes=b"ID3audio") as api:
+            api._public_base_url = "https://music.example.com"
+            sender = make_sender(api, modes=["file_local"])
+            sender.download_dir = tmp_path
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track())
+            assert ok  # 下载成功 => 用的是 raw url
+            seg = event.sent[0][1][0]
+            assert seg.name == "晴天 - 周杰伦.mp3"
+
+    async def test_card_audio_uses_public_url(self):
+        async with FakeUrlBackend([ok_url("320k")]) as api:
+            api._public_base_url = "https://music.example.com"
+
+            async def _pic_ok(music_id):
+                return "http://cdn.example.com/cover.jpg"
+
+            api.pic = _pic_ok
+            sender = make_sender(api, modes=["card"])
+            event = MockAiocqEvent(card_ok=True)
+            ok = await sender.send_track(event, make_track())
+            assert ok
+            payload = event.sent[0][2]
+            data = payload["message"][0]["data"]
+            assert data["audio"] == "https://music.example.com/api/temp/t"
+            assert data["url"] == "https://music.example.com/api/temp/t"

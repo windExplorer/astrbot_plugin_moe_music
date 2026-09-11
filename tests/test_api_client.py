@@ -267,3 +267,31 @@ class TestGuessExt:
     def test_by_content_type(self):
         assert guess_audio_ext("320k", "audio/flac; charset=utf-8") == ".flac"
         assert guess_audio_ext("320k", "audio/mpeg") == ".mp3"
+
+
+class TestPublicize:
+    """临时链接对外地址改写。"""
+
+    def _client(self, public_base_url: str) -> MusicApiClient:
+        return MusicApiClient("http://127.0.0.1:3000", "sk-test", public_base_url=public_base_url)
+
+    def test_empty_config_returns_original(self):
+        client = self._client("")
+        url = "http://127.0.0.1:3080/api/temp/tok"
+        assert client.publicize(url) == url
+        assert client.publicize("") == ""
+
+    def test_origin_replaced(self):
+        client = self._client("https://music.example.com")
+        out = client.publicize("http://127.0.0.1:3080/api/temp/tok")
+        assert out == "https://music.example.com/api/temp/tok"
+
+    def test_https_downgrade_note(self):
+        client = self._client("http://pub.example.com:8080")
+        out = client.publicize("https://backend.local/api/temp/tok?x=1")
+        assert out == "http://pub.example.com:8080/api/temp/tok?x=1"
+
+    def test_path_prefix_preserved(self):
+        client = self._client("https://example.com/music-api")
+        out = client.publicize("http://127.0.0.1:3080/api/temp/tok")
+        assert out == "https://example.com/music-api/api/temp/tok"

@@ -23,6 +23,7 @@
 |---|---|---|
 | `api_base_url` | lx_music_api 服务端地址（不含 `/api/v1`），需保证聊天客户端可访问 | `http://127.0.0.1:3000` |
 | `api_key` | 后端签发的 `sk-` 开头 API Key | 空 |
+| `public_base_url` | 临时链接对外可达地址（机器人经内网/localhost 访问后端时必填，如 `https://music.example.com`） | 空 |
 | `default_source` | 默认音源，`all` 为聚合搜索 | `all` |
 | `default_quality` | 默认音质（期望最高档，超 Key 上限自动收敛） | `320k` |
 | `song_limit` | 候选列表数量（1-20） | `5` |

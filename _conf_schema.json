@@ -11,6 +11,12 @@
         "type": "string",
         "default": ""
     },
+    "public_base_url": {
+        "description": "临时链接对外地址",
+        "hint": "音乐卡片 / 语音 / 文件 / 文本链接发送给用户的可播放地址。后端按访问它的地址签发临时链接，若机器人经局域网或 localhost 访问后端，签发的链接群友无法访问——此时填一个对外可达地址（如 https://music.example.com，可带路径前缀），插件会自动改写给用户的链接，而下载仍走后端原地址。留空表示后端地址本身对外可达",
+        "type": "string",
+        "default": ""
+    },
     "selection_display": {
         "description": "候选列表显示方式",
         "hint": "点歌搜索到多首歌曲时候选列表的展示形式：text 为纯文本序号列表（快、省流量），image 为带封面的图片菜单（美观、防刷屏，渲染失败自动回退文本）",

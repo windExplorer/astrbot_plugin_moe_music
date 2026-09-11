@@ -60,6 +60,7 @@ class MoeMusicPlugin(Star):
             api_key=self.cfg.api_key,
             request_timeout=self.cfg.request_timeout,
             proxy=self.cfg.proxy,
+            public_base_url=self.cfg.public_base_url,
         )
         # 临时下载目录：优先 AstrBot 临时目录，失败退回系统临时目录
         self.download_dir = Path(self._resolve_temp_dir()) / "moe_music" / uuid.uuid4().hex[:8]
