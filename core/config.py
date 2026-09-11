@@ -65,6 +65,11 @@ class PluginConfig:
     enable_lyrics: bool = False
     proxy: str = ""
     enable_self_test: bool = True
+    # 访问控制：白名单优先于黑名单；两者都为空时不限制
+    whitelist_groups: list[str] = field(default_factory=list)
+    whitelist_users: list[str] = field(default_factory=list)
+    blacklist_groups: list[str] = field(default_factory=list)
+    blacklist_users: list[str] = field(default_factory=list)
 
     @classmethod
     def from_astrbot_config(cls, config) -> "PluginConfig":
@@ -108,6 +113,10 @@ class PluginConfig:
             logger.warning(f"[萌音点歌] 配置 selection_display 无效：{selection_display}，回退为 text")
             selection_display = "text"
 
+        def _str_list(key: str) -> list[str]:
+            values = config.get(key, []) or []
+            return [str(v).strip() for v in values if str(v).strip()]
+
         return cls(
             api_base_url=base_url,
             api_key=api_key,
@@ -121,6 +130,10 @@ class PluginConfig:
             enable_lyrics=bool(config.get("enable_lyrics", False)),
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),
+            whitelist_groups=_str_list("whitelist_groups"),
+            whitelist_users=_str_list("whitelist_users"),
+            blacklist_groups=_str_list("blacklist_groups"),
+            blacklist_users=_str_list("blacklist_users"),
         )
 
     @property

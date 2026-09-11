@@ -12,12 +12,25 @@ from astrbot_plugin_moe_music.core.sender import SongSender
 
 
 class MockEvent:
-    def __init__(self, message_str="", sender_id="10001", umo="qq:GroupMessage:20001"):
+    def __init__(
+        self,
+        message_str="",
+        sender_id="10001",
+        umo="qq:GroupMessage:20001",
+        group_id="20001",
+        group_name="测试群",
+        is_admin=False,
+        private=False,
+    ):
         self.message_str = message_str
         self.sent = []
         self.stopped = False
         self.unified_msg_origin = umo
         self._sender_id = sender_id
+        self._group_id = group_id
+        self._group_name = group_name
+        self._is_admin = is_admin
+        self._private = private
 
     async def send(self, result):
         self.sent.append(result)
@@ -33,6 +46,26 @@ class MockEvent:
 
     def get_sender_id(self):
         return self._sender_id
+
+    def get_sender_name(self):
+        return "测试用户"
+
+    def get_platform_name(self):
+        return "aiocqhttp"
+
+    def get_group_id(self):
+        return self._group_id
+
+    def is_private_chat(self):
+        return self._private
+
+    def is_admin(self):
+        return self._is_admin
+
+    async def get_group(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(group_id=self._group_id, group_name=self._group_name)
 
 
 def track_json(i, cover=None):
@@ -120,6 +153,7 @@ class FakeBackend:
 
 
 def make_service(api, config_overrides=None):
+    from astrbot_plugin_moe_music.core.access import AccessController
     from astrbot_plugin_moe_music.core.songlist_render import SonglistRenderer
 
     cfg = PluginConfig.from_astrbot_config(
@@ -129,7 +163,7 @@ def make_service(api, config_overrides=None):
     font = Path(__file__).resolve().parent.parent / "fonts" / "simhei.ttf"
     renderer = LyricsRenderer(font)
     songlist = SonglistRenderer(font)
-    return MoeMusicService(cfg, api, sender, renderer, songlist)
+    return MoeMusicService(cfg, api, sender, renderer, songlist, access=AccessController(cfg))
 
 
 class TestSongRequest:
@@ -345,3 +379,117 @@ class TestSelectionDisplay:
             await service.handle_song_request(event, "晴天")
             kinds = [item[0] for item in event.sent]
             assert kinds == ["plain"]  # 默认文本，不发图片
+
+
+class TestAccessAndRecords:
+    """访问控制拦截与记录落库（v0.3.0）。"""
+
+    async def test_whitelist_blocks_group(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"whitelist_groups": ["其他群号"]})
+            event = MockEvent()  # 默认群 20001 不在白名单
+            await service.handle_song_request(event, "晴天")
+            assert event.sent[-1] == ("plain", "本群暂未开放点歌功能哦～")
+            # 未发生后端搜索
+            assert api.calls == []
+
+    async def test_whitelist_allows_listed_group(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"whitelist_groups": ["20001"]})
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            kinds = [item[0] for item in event.sent]
+            assert "chain" in kinds  # 正常发送
+
+    async def test_admin_bypasses_whitelist(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"whitelist_groups": ["其他群号"]})
+            event = MockEvent(is_admin=True)
+            await service.handle_song_request(event, "晴天")
+            kinds = [item[0] for item in event.sent]
+            assert "chain" in kinds  # 管理员不受限
+
+    async def test_blacklist_blocks_user_but_not_others(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"blacklist_users": ["10001"]})
+            event = MockEvent()  # sender_id=10001
+            await service.handle_song_request(event, "晴天")
+            assert event.sent[-1] == ("plain", "您暂时没有点歌权限哦～")
+
+            event2 = MockEvent(sender_id="10002")
+            await service.handle_song_request(event2, "晴天")
+            kinds = [item[0] for item in event2.sent]
+            assert "chain" in kinds
+
+    async def test_records_written_on_play(self, tmp_path):
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(tmp_path / "records.db")
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api)
+            service.store = store
+            service.sender.store = store
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1, command="点歌")
+
+        _, play_n = await store.counts()
+        assert play_n == 1
+        row = store._conn.execute(
+            "SELECT user_id, user_name, group_id, group_name, keyword, selection_type, "
+            "trigger_type, command, track_id, track_name, quality, send_mode "
+            "FROM play_records"
+        ).fetchone()
+        assert row[0] == "10001"
+        assert row[1] == "测试用户"
+        assert row[2] == "20001"
+        assert row[3] == "测试群"
+        assert row[4] == "晴天"
+        assert row[5] == "direct_index"
+        assert row[6] == "command"
+        assert row[7] == "点歌"
+        assert row[8] == "wy:1"
+        assert row[9] == "歌曲1"
+        assert row[10] == "320k"
+        assert row[11] == "text"
+
+    async def test_search_records_written(self, tmp_path):
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(tmp_path / "records.db")
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = make_service(api)
+            service.store = store
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+
+        search_n, _ = await store.counts()
+        assert search_n == 1
+        row = store._conn.execute(
+            "SELECT keyword, success, result_count, group_name, user_id FROM search_records"
+        ).fetchone()
+        assert row[0] == "晴天"
+        assert row[1] == 1
+        assert row[2] == 2
+        assert row[3] == "测试群"
+        assert row[4] == "10001"
+
+    async def test_search_record_error_logged(self, tmp_path):
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(tmp_path / "records.db")
+        async with FakeBackend(search_result=[]) as api:
+            service = make_service(api)
+            service.store = store
+
+            async def _dead(keyword, limit, source=None, quality=None):
+                from astrbot_plugin_moe_music.core.api_client import ApiError
+
+                raise ApiError(4290, "rate limited")
+
+            service.api.search = _dead
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+
+        row = store._conn.execute("SELECT success, error_code FROM search_records").fetchone()
+        assert row[0] == 0
+        assert row[1] == 4290

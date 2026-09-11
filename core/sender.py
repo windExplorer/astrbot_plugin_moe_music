@@ -33,15 +33,20 @@ def _safe_filename(name: str) -> str:
 class SongSender:
     """把一首 Track 以「卡片→语音→文件→文本」的顺序发送到聊天。"""
 
-    def __init__(self, config: PluginConfig, api: MusicApiClient, download_dir: Path):
+    def __init__(self, config: PluginConfig, api: MusicApiClient, download_dir: Path, store=None):
         self.cfg = config
         self.api = api
         self.download_dir = download_dir
+        self.store = store
 
     # ============ 对外入口 ============
 
-    async def send_track(self, event, track: Track) -> bool:
+    async def send_track(self, event, track: Track, record_ctx: dict | None = None) -> bool:
         """发送一首歌：解析播放链接（含音质收敛）→ 按 send_modes 降级发送。
+
+        Args:
+            record_ctx: 点歌记录上下文（用户/会话/选歌方式等），发送成功后
+                        补齐歌曲与发送细节写入 play_records；None 表示不记录。
 
         Returns:
             bool: 是否发送成功。
@@ -72,6 +77,18 @@ class SongSender:
                 sent = False
             if sent:
                 logger.info(f"[萌音点歌] 已通过 {mode} 发送歌曲《{track.display}》")
+                if record_ctx is not None and self.store:
+                    await self.store.add_play_record(
+                        **record_ctx,
+                        track_id=track.id,
+                        track_name=track.name,
+                        singer=track.singer,
+                        album=track.album,
+                        source=track.source,
+                        duration=track.duration,
+                        quality=quality,
+                        send_mode=mode,
+                    )
                 return True
             logger.debug(f"[萌音点歌] 发送模式 {mode} 失败或不可用，尝试下一模式")
 

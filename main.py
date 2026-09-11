@@ -19,12 +19,14 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
+from .core.access import AccessController
 from .core.api_client import ApiError, MusicApiClient
 from .core.commands import MoeMusicService
 from .core.config import COMMAND_SOURCE_ALIAS, LLM_SOURCE_ALIAS, PluginConfig
 from .core.lyrics_render import LyricsRenderer
 from .core.sender import SongSender
 from .core.songlist_render import SonglistRenderer
+from .core.storage import RecordStore
 
 # 点歌命令全部别名（含大小写变体，CommandFilter 匹配为大小写敏感，故全部显式列出）
 SONG_COMMAND_ALIASES = {
@@ -61,13 +63,33 @@ class MoeMusicPlugin(Star):
         )
         # 临时下载目录：优先 AstrBot 临时目录，失败退回系统临时目录
         self.download_dir = Path(self._resolve_temp_dir()) / "moe_music" / uuid.uuid4().hex[:8]
-        self.sender = SongSender(self.cfg, self.api, self.download_dir)
+        # 记录库：存 AstrBot 数据目录（不随插件卸载删除，供后续统计）
+        self.store = RecordStore(Path(self._resolve_data_dir()) / "moe_music" / "records.db")
+        self.access = AccessController(self.cfg)
+        self.sender = SongSender(self.cfg, self.api, self.download_dir, store=self.store)
         font_path = Path(__file__).parent / "fonts" / "simhei.ttf"
         self.lyrics_renderer = LyricsRenderer(font_path)
         self.songlist_renderer = SonglistRenderer(font_path)
         self.service = MoeMusicService(
-            self.cfg, self.api, self.sender, self.lyrics_renderer, self.songlist_renderer
+            self.cfg,
+            self.api,
+            self.sender,
+            self.lyrics_renderer,
+            self.songlist_renderer,
+            store=self.store,
+            access=self.access,
         )
+
+    @staticmethod
+    def _resolve_data_dir() -> str:
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            return get_astrbot_data_path()
+        except Exception:
+            import tempfile
+
+            return tempfile.gettempdir()
 
     @staticmethod
     def _resolve_temp_dir() -> str:
@@ -101,8 +123,9 @@ class MoeMusicPlugin(Star):
             logger.warning("[萌音点歌] 启动自检异常（网络不可达？）")
 
     async def terminate(self):
-        """插件卸载：释放 HTTP 会话并清理临时目录。"""
+        """插件卸载：释放 HTTP 会话、关闭记录库并清理临时目录。"""
         await self.api.close()
+        await self.store.close()
         self.sender.cleanup_download_dir()
 
     # ============ 命令 ============
@@ -134,7 +157,9 @@ class MoeMusicPlugin(Star):
             return
 
         try:
-            await self.service.handle_song_request(event, arg, source=source, index_hint=index_hint)
+            await self.service.handle_song_request(
+                event, arg, source=source, index_hint=index_hint, command=cmd
+            )
         except Exception:
             logger.error(f"[萌音点歌] 点歌处理异常：\n{traceback.format_exc()}")
             await event.send(event.plain_result("点歌出了点小问题，请稍后再试～"))
@@ -155,7 +180,7 @@ class MoeMusicPlugin(Star):
             return
 
         try:
-            await self.service.handle_lyrics_request(event, arg.strip())
+            await self.service.handle_lyrics_request(event, arg.strip(), command=cmd)
         except Exception:
             logger.error(f"[萌音点歌] 查歌词处理异常：\n{traceback.format_exc()}")
             await event.send(event.plain_result("歌词查询出了点小问题，请稍后再试～"))
