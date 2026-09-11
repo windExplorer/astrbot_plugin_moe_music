@@ -31,6 +31,7 @@
 | `timeout` | 选歌等待超时（秒） | `15` |
 | `request_timeout` | 单次 HTTP 超时（秒） | `10` |
 | `enable_lyrics` | 点歌成功后追加歌词图片 | `false` |
+| `embed_metadata` | 本地文件模式嵌入封面/歌词/标题等元数据（mp3/flac/m4a） | `true` |
 | `proxy` | 网络代理（可选） | 空 |
 | `enable_self_test` | 启用「点歌自检」命令 | `true` |
 | `whitelist_groups` | 点歌白名单 · 群号（支持 `*` 通配） | 空 |
@@ -78,7 +79,7 @@ QQ点歌 晴天 2
 2. 在插件配置中填写 `api_base_url` 与 `api_key`；
 3. 发送 `点歌自检` 验证连通性。
 
-依赖（安装时由 AstrBot 自动安装，见 `requirements.txt`）：`aiohttp`、`aiofiles`、`Pillow`。
+依赖（安装时由 AstrBot 自动安装，见 `requirements.txt`）：`aiohttp`、`aiofiles`、`Pillow`、`mutagen`。
 
 ## 开发
 

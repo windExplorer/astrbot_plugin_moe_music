@@ -85,6 +85,12 @@
         "type": "bool",
         "default": false
     },
+    "embed_metadata": {
+        "description": "文件嵌入封面与歌词",
+        "hint": "本地文件模式发送时，把标题/歌手/专辑/封面图片/歌词写入音频文件的标签（支持 mp3/flac/m4a），播放器可直接显示。语音消息不适用（QQ 会转码丢弃）",
+        "type": "bool",
+        "default": true
+    },
     "proxy": {
         "description": "网络代理",
         "hint": "访问音乐后端使用的代理，如 http://127.0.0.1:7890，留空直连",

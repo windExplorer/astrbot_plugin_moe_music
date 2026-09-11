@@ -63,6 +63,7 @@ class PluginConfig:
     timeout: int = 15
     request_timeout: int = 10
     enable_lyrics: bool = False
+    embed_metadata: bool = True  # 文件模式嵌入封面/歌词/标题等元数据
     proxy: str = ""
     enable_self_test: bool = True
     # 访问控制：白名单优先于黑名单；两者都为空时不限制
@@ -128,6 +129,7 @@ class PluginConfig:
             timeout=_int_opt("timeout", 15, 5, 60),
             request_timeout=_int_opt("request_timeout", 10, 5, 30),
             enable_lyrics=bool(config.get("enable_lyrics", False)),
+            embed_metadata=bool(config.get("embed_metadata", True)),
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),
             whitelist_groups=_str_list("whitelist_groups"),

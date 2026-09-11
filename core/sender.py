@@ -7,6 +7,7 @@
 - ``text``：纯文本临时链接兜底。
 """
 
+import asyncio
 import re
 import traceback
 from pathlib import Path
@@ -19,6 +20,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 from .api_client import ApiError, MusicApiClient, guess_audio_ext
 from .config import PluginConfig
+from .metadata import embed_metadata
 from .model import Track, quality_rank
 
 # 非法文件名字符
@@ -58,8 +60,11 @@ class SongSender:
             return False
 
         cover_url = ""
-        # 卡片 / 本地文件模式才需要封面；失败不影响发送主流程
-        if any(m in ("card",) for m in self.cfg.send_modes):
+        # 卡片（展示封面）/ 开启元数据嵌入的本地文件模式 才需要封面；失败不影响发送主流程
+        need_cover = "card" in self.cfg.send_modes or (
+            self.cfg.embed_metadata and "file_local" in self.cfg.send_modes
+        )
+        if need_cover:
             try:
                 cover_url = await self.api.pic(track.id) or ""
             except ApiError as e:
@@ -159,7 +164,7 @@ class SongSender:
         if mode == "file_link":
             return await self._send_file_link(event, track, audio_url, quality)
         if mode == "file_local":
-            return await self._send_file_local(event, track, audio_url, quality)
+            return await self._send_file_local(event, track, audio_url, quality, cover_url)
         if mode == "text":
             return await self._send_text(event, track, audio_url)
         logger.warning(f"[萌音点歌] 未知的发送模式：{mode}")
@@ -223,15 +228,45 @@ class SongSender:
         await event.send(event.chain_result([seg]))
         return True
 
-    async def _send_file_local(self, event, track: Track, audio_url: str, quality: str) -> bool:
+    async def _send_file_local(
+        self, event, track: Track, audio_url: str, quality: str, cover_url: str = ""
+    ) -> bool:
         if not audio_url:
             return False
         path = await self._download_audio(track, audio_url, quality)
         if not path:
             return False
+        if self.cfg.embed_metadata:
+            await self._embed_track_metadata(path, track, cover_url)
         seg = File(name=path.name, file=str(path))
         await event.send(event.chain_result([seg]))
         return True
+
+    async def _embed_track_metadata(self, path: Path, track: Track, cover_url: str) -> None:
+        """为本地文件嵌入标题/歌手/专辑/封面/歌词；任一失败静默降级，不阻断发送。"""
+        cover_bytes = None
+        if cover_url:
+            try:
+                cover_bytes = await self.api.download_bytes(cover_url)
+            except ApiError as e:
+                logger.warning(f"[萌音点歌] 封面下载失败，跳过封面嵌入：code={e.code}")
+
+        lyrics = None
+        try:
+            lyric_data = await self.api.lyric(track.id)
+            lyrics = (lyric_data or {}).get("lyric", "") or None
+        except ApiError as e:
+            logger.debug(f"[萌音点歌] 歌词获取失败，跳过歌词嵌入：code={e.code}")
+
+        await asyncio.to_thread(
+            embed_metadata,
+            path,
+            title=track.name,
+            artist=track.singer or "未知歌手",
+            album=track.album or "",
+            cover_bytes=cover_bytes,
+            lyrics=lyrics,
+        )
 
     async def _send_text(self, event, track: Track, audio_url: str) -> bool:
         if not audio_url:
