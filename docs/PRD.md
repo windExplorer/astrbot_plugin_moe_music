@@ -362,12 +362,12 @@ lx_music_api（自有后端）
 ```python
 @dataclass(slots=True)
 class Track:
-    id: str              # 后端全局 id
+    id: str  # 后端全局 id
     name: str
     singer: str
     album: str
-    duration: int        # 秒
-    source: str          # 平台码
+    duration: int  # 秒
+    source: str  # 平台码
     qualitys: list[str]
     cover_url: str | None
 ```

@@ -1,0 +1,29 @@
+[project]
+name = "astrbot-plugin-moe-music"
+version = "0.1.0"
+description = "连接自建 lx_music_api 音源后端的 AstrBot 点歌插件"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "aiofiles>=23.2",
+    "Pillow>=10.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "pyyaml>=6.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]

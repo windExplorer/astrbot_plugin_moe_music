@@ -1,0 +1,100 @@
+{
+    "api_base_url": {
+        "description": "音乐后端地址",
+        "hint": "lx_music_api 服务端对外可达地址（不含 /api/v1），例如 http://127.0.0.1:3000。临时播放链接基于此地址生成，需保证聊天客户端可访问",
+        "type": "string",
+        "default": "http://127.0.0.1:3000"
+    },
+    "api_key": {
+        "description": "API Key",
+        "hint": "后端开放 API 签发的 sk- 开头密钥，用于鉴权与限额（必填）",
+        "type": "string",
+        "default": ""
+    },
+    "selection_display": {
+        "description": "候选列表显示方式",
+        "hint": "点歌搜索到多首歌曲时候选列表的展示形式：text 为纯文本序号列表（快、省流量），image 为带封面的图片菜单（美观、防刷屏，渲染失败自动回退文本）",
+        "type": "string",
+        "options": ["text(文本列表)", "image(图片菜单)"],
+        "default": "text(文本列表)"
+    },
+    "default_source": {
+        "description": "默认点歌音源",
+        "hint": "all 表示聚合搜索全部音源，也可固定单个平台",
+        "type": "string",
+        "options": ["all(聚合)", "wy(网易云)", "tx(QQ音乐)", "kw(酷我)", "kg(酷狗)", "mg(咪咕)"],
+        "default": "all(聚合)"
+    },
+    "default_quality": {
+        "description": "默认音质",
+        "hint": "期望的最高音质，取播放链接时传给后端；超过 API Key 上限时自动收敛到允许的最高音质",
+        "type": "string",
+        "options": ["128k", "192k", "320k", "flac", "flac24bit", "wav", "ape", "atmos", "dolby", "master"],
+        "default": "320k"
+    },
+    "song_limit": {
+        "description": "候选列表数量",
+        "hint": "点歌搜索返回的候选歌曲数量",
+        "type": "int",
+        "slider": {
+            "min": 1,
+            "max": 20,
+            "step": 1
+        },
+        "default": 5
+    },
+    "send_modes": {
+        "description": "发送方式与优先级",
+        "hint": "按顺序尝试，失败或平台不支持时自动降级到下一种。card 仅 aiocqhttp(QQ) 平台可用；record_link/file_link 发送快，record_local/file_local 需先下载更稳定；text 为纯文本链接兜底",
+        "type": "list",
+        "options": [
+            "card(音乐卡片)",
+            "record_link(语音链接)",
+            "record_local(本地语音)",
+            "file_link(文件链接)",
+            "file_local(本地文件)",
+            "text(文本链接)"
+        ],
+        "default": ["card(音乐卡片)", "record_link(语音链接)", "file_local(本地文件)", "text(文本链接)"]
+    },
+    "timeout": {
+        "description": "选歌等待超时（秒）",
+        "hint": "发送候选列表后，用户在此时间内回复序号有效，超时自动取消",
+        "type": "int",
+        "slider": {
+            "min": 5,
+            "max": 60,
+            "step": 5
+        },
+        "default": 15
+    },
+    "request_timeout": {
+        "description": "HTTP 请求超时（秒）",
+        "hint": "访问音乐后端的单次请求超时时间",
+        "type": "int",
+        "slider": {
+            "min": 5,
+            "max": 30,
+            "step": 1
+        },
+        "default": 10
+    },
+    "enable_lyrics": {
+        "description": "点歌后附带歌词",
+        "hint": "开启后点歌成功会追加发送一张歌词图片",
+        "type": "bool",
+        "default": false
+    },
+    "proxy": {
+        "description": "网络代理",
+        "hint": "访问音乐后端使用的代理，如 http://127.0.0.1:7890，留空直连",
+        "type": "string",
+        "default": ""
+    },
+    "enable_self_test": {
+        "description": "启用点歌自检命令",
+        "hint": "开启后可使用「点歌自检」命令检测后端连接与 API Key 限额",
+        "type": "bool",
+        "default": true
+    }
+}

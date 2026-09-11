@@ -1,0 +1,347 @@
+"""点歌业务逻辑测试（MoeMusicService）与插件入口冒烟测试。"""
+
+import sys
+from pathlib import Path
+
+from aiohttp import web
+from astrbot_plugin_moe_music.core.api_client import MusicApiClient
+from astrbot_plugin_moe_music.core.commands import MoeMusicService
+from astrbot_plugin_moe_music.core.config import PluginConfig
+from astrbot_plugin_moe_music.core.lyrics_render import LyricsRenderer
+from astrbot_plugin_moe_music.core.sender import SongSender
+
+
+class MockEvent:
+    def __init__(self, message_str="", sender_id="10001", umo="qq:GroupMessage:20001"):
+        self.message_str = message_str
+        self.sent = []
+        self.stopped = False
+        self.unified_msg_origin = umo
+        self._sender_id = sender_id
+
+    async def send(self, result):
+        self.sent.append(result)
+
+    def plain_result(self, text):
+        return ("plain", text)
+
+    def chain_result(self, chain):
+        return ("chain", chain)
+
+    def stop_event(self):
+        self.stopped = True
+
+    def get_sender_id(self):
+        return self._sender_id
+
+
+def track_json(i, cover=None):
+    return {
+        "id": f"wy:{i}",
+        "name": f"歌曲{i}",
+        "singer": f"歌手{i}",
+        "album": "专辑",
+        "duration": 200,
+        "source": "wy",
+        "qualitys": ["128k", "320k"],
+        "coverUrl": cover,
+    }
+
+
+class FakeBackend:
+    def __init__(self, search_result, lyric_text="", extra_routes=None):
+        self.search_result = search_result
+        self.lyric_text = lyric_text
+        self.requests = []
+        app = web.Application()
+
+        for path, handler in (extra_routes or {}).items():
+            app.router.add_get(path, handler)
+
+        async def search(request):
+            self.requests.append(("search", dict(request.query)))
+            return web.json_response(
+                {
+                    "code": 0,
+                    "message": "ok",
+                    "data": {"total": len(self.search_result), "list": self.search_result},
+                }
+            )
+
+        async def url(request):
+            self.requests.append(("url", {}))
+            return web.json_response(
+                {"code": 0, "message": "ok", "data": {"url": "http://h/api/temp/t", "quality": "320k"}}
+            )
+
+        async def lyric(request):
+            self.requests.append(("lyric", {}))
+            if not self.lyric_text:
+                return web.json_response({"code": 4040, "message": "none", "data": None}, status=404)
+            return web.json_response({"code": 0, "message": "ok", "data": {"lyric": self.lyric_text}})
+
+        async def me(request):
+            self.requests.append(("me", {}))
+            return web.json_response(
+                {
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "authenticatedAs": "apikey",
+                        "apiKey": {
+                            "name": "测试Key",
+                            "status": "active",
+                            "qpsLimit": 5,
+                            "maxQuality": "320k",
+                            "allowedSources": ["wy", "tx"],
+                        },
+                    },
+                }
+            )
+
+        app.router.add_get("/api/v1/search", search)
+        app.router.add_get("/api/v1/music/wy:{i}/url", url)
+        app.router.add_get("/api/v1/music/wy:{i}/lyric", lyric)
+        app.router.add_get("/api/v1/me", me)
+        self.runner = web.AppRunner(app)
+
+    async def __aenter__(self):
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await site.start()
+        port = self.runner.addresses[0][1]
+        client = MusicApiClient(f"http://127.0.0.1:{port}", "sk-test", request_timeout=5)
+        client.calls = self.requests
+        client.backend = self  # 暴露 FakeBackend 本体，测试可动态注册额外路由
+        return client
+
+    async def __aexit__(self, *args):
+        await self.runner.cleanup()
+
+
+def make_service(api, config_overrides=None):
+    from astrbot_plugin_moe_music.core.songlist_render import SonglistRenderer
+
+    cfg = PluginConfig.from_astrbot_config(
+        {"api_key": "sk-test", "send_modes": ["text"], "timeout": 5, **(config_overrides or {})}
+    )
+    sender = SongSender(cfg, api, Path(__file__).parent / "_tmp_downloads")
+    font = Path(__file__).resolve().parent.parent / "fonts" / "simhei.ttf"
+    renderer = LyricsRenderer(font)
+    songlist = SonglistRenderer(font)
+    return MoeMusicService(cfg, api, sender, renderer, songlist)
+
+
+class TestSongRequest:
+    async def test_no_result_hint(self):
+        async with FakeBackend(search_result=[]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_song_request(event, "不存在歌曲xyz")
+            assert event.sent[-1] == ("plain", "没有找到相关歌曲，换个关键词试试吧～")
+
+    async def test_single_result_direct_send(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            # 直接发送，不发候选列表
+            assert len(event.sent) == 1
+            kind, chain = event.sent[0]
+            assert kind == "chain"  # text 模式发送的链接消息链
+            assert any(
+                "http" in getattr(seg, "text", "") or "http" in str(getattr(seg, "args", "")) for seg in chain
+            )
+
+    async def test_multi_result_shows_list(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2), track_json(3)]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            # conftest stub 的 session_waiter 立即返回；应发出候选列表
+            list_msg = event.sent[0][1]
+            assert "回复序号点歌" in list_msg
+            assert "1. 歌曲1 - 歌手1" in list_msg
+            assert "3. 歌曲3 - 歌手3" in list_msg
+
+    async def test_index_hint_direct_send(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=2)
+            assert len(event.sent) == 1  # 直接发送第 2 首，不展示列表
+
+
+class TestLyrics:
+    async def test_lyrics_image_sent(self):
+        lrc = "[00:01.00]故事的小黄花\n[00:02.00]从出生那年就飘着"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service = make_service(api)
+            event = MockEvent()
+            ok = await service.handle_lyrics_request(event, "晴天")
+            assert ok
+            assert event.sent[0][0] == "chain"  # 图片 + 说明
+
+    async def test_lyrics_empty_hint(self):
+        async with FakeBackend(search_result=[track_json(1)], lyric_text="") as api:
+            service = make_service(api)
+            event = MockEvent()
+            ok = await service.handle_lyrics_request(event, "晴天")
+            assert not ok
+            assert event.sent[-1] == ("plain", "这首歌暂无歌词～")
+
+    async def test_lyrics_fallback_text_on_render_error(self):
+        lrc = "[00:01.00]正常歌词"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service = make_service(api)
+
+            async def _boom(*args, **kwargs):
+                raise RuntimeError("render fail")
+
+            service.lyrics_renderer.render_async = _boom
+            event = MockEvent()
+            ok = await service.handle_lyrics_request(event, "晴天")
+            assert ok
+            assert event.sent[-1][0] == "plain"
+            assert "正常歌词" in event.sent[-1][1]
+
+
+class TestSelfTest:
+    async def test_self_test_ok(self):
+        async with FakeBackend(search_result=[]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_self_test(event)
+            text = event.sent[0][1]
+            assert "连接正常" in text
+            assert "测试Key" in text
+            assert "320k" in text
+            assert "wy、tx" in text
+
+
+class TestLlmTools:
+    async def test_play_song_returns_summary(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            result = await service.llm_play_song(event, "晴天")
+            assert "已为用户播放" in result
+            assert "歌曲1" in result
+
+    async def test_play_song_no_result(self):
+        async with FakeBackend(search_result=[]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            result = await service.llm_play_song(event, "不存在的歌")
+            assert "没有找到" in result
+
+    async def test_query_lyrics_returns_summary(self):
+        lrc = "[00:01.00]歌词内容"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service = make_service(api)
+            event = MockEvent()
+            result = await service.llm_query_lyrics(event, "晴天")
+            assert "已为用户展示" in result
+
+
+class TestPluginSmoke:
+    def test_plugin_instantiates(self):
+        from astrbot_plugin_moe_music.main import MoeMusicPlugin
+
+        cfg = {
+            "api_base_url": "http://127.0.0.1:3000",
+            "api_key": "sk-test1234567890",
+            "send_modes": ["card(音乐卡片)", "text(文本链接)"],
+        }
+        plugin = MoeMusicPlugin(context=None, config=cfg)
+        assert plugin.cfg.api_key == "sk-test1234567890"
+        assert plugin.cfg.send_modes == ["card", "text"]
+        assert callable(plugin.song_command)
+        assert callable(plugin.lyrics_command)
+        assert callable(plugin.self_test_command)
+        assert callable(plugin.play_song_by_name)
+        assert callable(plugin.query_lyrics_by_name)
+
+    async def test_song_command_usage_hint(self):
+        from astrbot_plugin_moe_music.main import MoeMusicPlugin
+
+        plugin = MoeMusicPlugin(context=None, config={"api_base_url": "http://x", "api_key": "sk-test"})
+        event = MockEvent(message_str="点歌")
+        await plugin.song_command(event)
+        assert any("用法" in item[1] for item in event.sent if item[0] == "plain")
+        assert event.stopped
+
+    async def test_song_command_with_index(self):
+        from astrbot_plugin_moe_music.main import MoeMusicPlugin
+
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            plugin = MoeMusicPlugin(context=None, config={"api_base_url": "", "api_key": "sk-test"})
+            # 复用同一个 backend 的地址
+            plugin.cfg.api_base_url = api._base_url
+            plugin.api._base_url = api._base_url
+            event = MockEvent(message_str="点歌 晴天 2")
+            await plugin.song_command(event)
+            assert event.stopped
+            kinds = [item[0] for item in event.sent]
+            assert "plain" in kinds or "chain" in kinds
+
+
+def _tiny_jpeg_bytes() -> bytes:
+    """生成一张 8x8 纯色 JPEG 作为假封面。"""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 60, 60)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+class TestSelectionDisplay:
+    """候选列表显示方式：文本 / 图片菜单。"""
+
+    async def test_image_mode_sends_image(self):
+        from aiohttp import web as _web
+
+        cover = _tiny_jpeg_bytes()
+
+        async def cover_handler(request):
+            return _web.Response(body=cover, content_type="image/jpeg")
+
+        async with FakeBackend(
+            search_result=[track_json(1, "http://h/1.jpg"), track_json(2, "http://h/2.jpg")],
+            extra_routes={"/1.jpg": cover_handler, "/2.jpg": cover_handler},
+        ) as api:
+            service = make_service(api, {"selection_display": "image(图片菜单)"})
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            # 应发送图片消息链（无纯文本候选列表）
+            kinds = [item[0] for item in event.sent]
+            assert "chain" in kinds
+            img_comp = sys.modules["astrbot.api.message_components"].Image
+            chain = next(item[1] for item in event.sent if item[0] == "chain")
+            assert any(isinstance(seg, img_comp) for seg in chain)
+
+    async def test_image_mode_falls_back_on_render_error(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = make_service(api, {"selection_display": "image"})
+
+            async def _boom(*args, **kwargs):
+                raise RuntimeError("render fail")
+
+            service.songlist_renderer.render_async = _boom
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            # 渲染失败回退文本列表
+            kinds = [item[0] for item in event.sent]
+            assert "plain" in kinds
+            text = next(item[1] for item in event.sent if item[0] == "plain")
+            assert "回复序号点歌" in text
+
+    async def test_text_mode_default(self):
+        async with FakeBackend(search_result=[track_json(1, "http://h/1.jpg"), track_json(2)]) as api:
+            service = make_service(api)
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            kinds = [item[0] for item in event.sent]
+            assert kinds == ["plain"]  # 默认文本，不发图片
