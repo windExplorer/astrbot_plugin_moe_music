@@ -59,6 +59,19 @@ QQ点歌 晴天 2
 - **QQ（aiocqhttp / OneBot：NapCat、Lagrange 等）**：完整体验，含音乐卡片；
 - **QQ 官方机器人 / Telegram / 微信 / Discord 等**：自动降级为语音 / 文件 / 文本发送。
 
+### 关于音质（重要）
+
+各发送方式的音质由 QQ 协议决定：
+
+| 方式 | 音质 |
+|---|---|
+| `card` 音乐卡片 | ★★★★★ 客户端直接在线播放临时链接，不转码，flac 链接即无损听感 |
+| `file_link` / `file_local` 文件 | ★★★★★ 文件原样传输，下载后本地播放无损 |
+| `record_link` / `record_local` 语音 | ★☆☆☆☆ QQ 协议强制将音频转为 **24kHz 单声道 SILK 语音编码**（NapCat 用 ffmpeg 转码），音乐会明显模糊发闷，仅适合人声/语音场景 |
+| `text` 文本链接 | 取决于用户用什么播放器打开 |
+
+如果你点了 flac 却觉得「模糊」，大概率是降级到了语音模式——建议把 `send_modes` 调整为 `card → file_local → text`（去掉 record），或检查音乐卡片为何发送失败（看 AstrBot 日志）。
+
 ## 安装
 
 1. 在 AstrBot 插件市场或 Dashboard「插件管理 → 从本地上传」安装本插件 zip 包；

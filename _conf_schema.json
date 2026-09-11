@@ -45,7 +45,7 @@
     },
     "send_modes": {
         "description": "发送方式与优先级",
-        "hint": "按顺序尝试，失败或平台不支持时自动降级到下一种。card 仅 aiocqhttp(QQ) 平台可用；record_link/file_link 发送快，record_local/file_local 需先下载更稳定；text 为纯文本链接兜底",
+        "hint": "按顺序尝试，失败或平台不支持时自动降级到下一种。card 仅 aiocqhttp(QQ) 平台可用，在线播放不转码、音质最佳；record_link/record_local 语音消息会被 QQ 强制转为 24kHz 单声道 silk 语音编码，音乐会明显模糊（协议限制，仅适合语音场景）；file_link/file_local 文件原样传输不损失音质；text 为纯文本链接兜底",
         "type": "list",
         "options": [
             "card(音乐卡片)",

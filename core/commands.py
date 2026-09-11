@@ -170,7 +170,7 @@ class MoeMusicService:
 
         # 一次到位：带序号且合法，直接发送
         if 0 < index_hint <= len(tracks):
-            await self.sender.send_track(
+            await self._send_track(
                 event,
                 tracks[index_hint - 1],
                 record_ctx={**record_base, "selected_index": index_hint, "selection_type": "direct_index"},
@@ -185,7 +185,7 @@ class MoeMusicService:
 
         # 单曲直发
         if len(tracks) == 1:
-            await self.sender.send_track(
+            await self._send_track(
                 event, tracks[0], record_ctx={**record_base, "selected_index": 1, "selection_type": "single"}
             )
             return
@@ -250,7 +250,7 @@ class MoeMusicService:
                 return
             controller.stop()
             ev.stop_event()
-            await self.sender.send_track(
+            await self._send_track(
                 ev, tracks[n - 1], record_ctx={**record_base, "selected_index": n, "selection_type": "picked"}
             )
 
@@ -284,19 +284,41 @@ class MoeMusicService:
             return False
         return await self.send_lyrics_for_track(event, tracks[0])
 
-    async def send_lyrics_for_track(self, event: AstrMessageEvent, track: Track) -> bool:
-        """取歌词并渲染发送；渲染失败回退纯文本。"""
+    async def _send_track(
+        self, event: AstrMessageEvent, track: Track, record_ctx: dict | None = None
+    ) -> bool:
+        """发送歌曲的统一入口；开启 enable_lyrics 时成功后静默追加歌词图片。"""
+        sent = await self.sender.send_track(event, track, record_ctx=record_ctx)
+        if sent and self.cfg.enable_lyrics:
+            try:
+                await self.send_lyrics_for_track(event, track, quiet=True)
+            except Exception:
+                logger.warning(f"[萌音点歌] 附加歌词失败（不影响点歌）：\n{traceback.format_exc()}")
+        return sent
+
+    async def send_lyrics_for_track(self, event: AstrMessageEvent, track: Track, quiet: bool = False) -> bool:
+        """取歌词并渲染发送；渲染失败回退纯文本。
+
+        Args:
+            quiet: 静默模式（点歌后附加歌词场景）：取词失败 / 歌词为空 / 发送失败
+                   只记日志不发提示，避免打扰用户。
+
+        Returns:
+            bool: 是否成功发送。
+        """
         try:
             lyric_data = await self.api.lyric(track.id)
         except ApiError as e:
             logger.error(f"[萌音点歌] 获取歌词失败：code={e.code} {e.message}（{track.id}）")
-            await event.send(event.plain_result(e.user_hint))
+            if not quiet:
+                await event.send(event.plain_result(e.user_hint))
             return False
 
         lyric_text = (lyric_data or {}).get("lyric", "") or ""
         if not lyric_text.strip():
             logger.info(f"[萌音点歌] 歌词为空：{track.id}")
-            await event.send(event.plain_result("这首歌暂无歌词～"))
+            if not quiet:
+                await event.send(event.plain_result("这首歌暂无歌词～"))
             return False
 
         try:
@@ -311,12 +333,12 @@ class MoeMusicService:
             return True
 
         sent = await send_lyrics_image(event, image_bytes)
-        if not sent:
+        if not sent and not quiet:
             await event.send(
                 event.plain_result(f"《{track.name}》 {track.singer}\n\n{self._plain_lyrics(lyric_text)}")
             )
             return True
-        return True
+        return sent
 
     @staticmethod
     def _plain_lyrics(lyrics: str) -> str:
@@ -377,7 +399,7 @@ class MoeMusicService:
         if not tracks:
             return f"没有找到《{song_name}》相关的歌曲"
         track = tracks[0]
-        sent = await self.sender.send_track(
+        sent = await self._send_track(
             event,
             track,
             record_ctx={

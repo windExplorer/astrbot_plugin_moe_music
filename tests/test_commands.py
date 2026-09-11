@@ -493,3 +493,47 @@ class TestAccessAndRecords:
         row = store._conn.execute("SELECT success, error_code FROM search_records").fetchone()
         assert row[0] == 0
         assert row[1] == 4290
+
+
+class TestLyricsAttachment:
+    """enable_lyrics：点歌成功后附加歌词（v0.3.1 修复）。"""
+
+    def _make_with_lyrics(self, api, lyric_text, store=None):
+        service = make_service(api, {"enable_lyrics": True})
+        if store:
+            service.store = store
+            service.sender.store = store
+        # FakeBackend 的 lyric 路由由 lyric_text 参数控制
+        return service
+
+    async def test_append_lyrics_image_after_song(self):
+        lrc = "[00:01.00]故事的小黄花\n[00:02.00]从出生那年就飘着"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service = self._make_with_lyrics(api, lrc)
+            event = MockEvent()
+            ok = await service.handle_song_request(event, "晴天", index_hint=1)
+            assert ok is None  # 命令路径无返回值
+            kinds = [item[0] for item in event.sent]
+            # 歌（chain: text 模式）+ 歌词图片（chain: Image）
+            assert kinds.count("chain") == 2
+            img_comp = sys.modules["astrbot.api.message_components"].Image
+            lyric_chain = event.sent[-1][1]
+            assert any(isinstance(seg, img_comp) for seg in lyric_chain)
+
+    async def test_append_lyrics_silent_when_empty(self):
+        async with FakeBackend(search_result=[track_json(1)], lyric_text="") as api:
+            service = self._make_with_lyrics(api, "")
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
+            kinds = [item[0] for item in event.sent]
+            # 只有歌本身；歌词为空时静默，不发"暂无歌词"提示
+            assert kinds == ["chain"]
+
+    async def test_no_lyrics_when_disabled(self):
+        lrc = "[00:01.00]歌词"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service = make_service(api, {"enable_lyrics": False})
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
+            kinds = [item[0] for item in event.sent]
+            assert kinds == ["chain"]  # 只发歌，无歌词
