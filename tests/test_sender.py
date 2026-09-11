@@ -83,9 +83,10 @@ TOO_HIGH = (422, {"code": 4220, "message": "quality too high", "data": None})
 class FakeUrlBackend:
     """只提供 /music/:id/url 的假后端，记录每次请求的 quality。"""
 
-    def __init__(self, script):
+    def __init__(self, script, audio_bytes=None):
         self.script = list(script)
         self.calls = []
+        self.audio_bytes = audio_bytes  # 提供时可下载 /api/temp/t（file/record_local 测试用）
         app = web.Application()
 
         async def url_handler(request):
@@ -94,6 +95,14 @@ class FakeUrlBackend:
             return web.json_response(payload, status=status)
 
         app.router.add_get("/api/v1/music/wy:1/url", url_handler)
+
+        if self.audio_bytes is not None:
+            body = self.audio_bytes
+
+            async def audio_handler(request):
+                return web.Response(body=body, content_type="audio/mpeg")
+
+            app.router.add_get("/api/temp/t", audio_handler)
         self.runner = web.AppRunner(app)
 
     async def __aenter__(self):
@@ -101,6 +110,21 @@ class FakeUrlBackend:
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
         await site.start()
         port = self.runner.addresses[0][1]
+        if self.audio_bytes is not None:
+            # 把响应中的占位临时链接改写为本地可达地址
+            base = f"http://127.0.0.1:{port}"
+
+            def _rewrite(item):
+                status, payload = item
+                if (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("data"), dict)
+                    and payload["data"].get("url")
+                ):
+                    payload = {**payload, "data": {**payload["data"], "url": f"{base}/api/temp/t"}}
+                return status, payload
+
+            self.script = [_rewrite(i) for i in self.script]
         client = MusicApiClient(f"http://127.0.0.1:{port}", "sk-test", request_timeout=5)
         client.calls = self.calls  # 共享请求记录，测试可直接访问
         return client
@@ -192,3 +216,18 @@ class TestSendTrackFallback:
             ok = await sender.send_track(event, make_track())
             assert not ok
             assert event.sent[-1] == ("plain", "网络开小差了，请稍后重试～")
+
+
+class TestLocalFilename:
+    """本地文件命名：歌名 - 歌手.扩展名，无随机后缀。"""
+
+    async def test_clean_filename_no_hash(self, tmp_path):
+        async with FakeUrlBackend([ok_url("flac")], audio_bytes=b"ID3fake-flac-audio") as api:
+            sender = make_sender(api, modes=["file_local"])
+            sender.download_dir = tmp_path
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track(), record_ctx={"user_id": "1"})
+            assert ok
+            kind, chain = event.sent[0]
+            seg = chain[0]
+            assert seg.name == "晴天 - 周杰伦.flac"

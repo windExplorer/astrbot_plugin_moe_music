@@ -9,7 +9,6 @@
 
 import re
 import traceback
-import uuid
 from pathlib import Path
 
 from astrbot.api import logger
@@ -245,10 +244,13 @@ class SongSender:
     # ============ 下载辅助 ============
 
     async def _download_audio(self, track: Track, audio_url: str, quality: str) -> Path | None:
-        """下载音频到插件临时目录，返回本地路径。"""
+        """下载音频到插件临时目录，返回本地路径。
+
+        文件名用「歌名 - 歌手.扩展名」，干净可读；同目录隔离由 download_dir
+        的每次启动随机子目录保证，无需在文件名上再加随机后缀。
+        """
         ext = guess_audio_ext(quality)
-        filename = f"{_safe_filename(track.display)}_{uuid.uuid4().hex[:8]}{ext}"
-        dest = self.download_dir / filename
+        dest = self.download_dir / f"{_safe_filename(track.display)}{ext}"
         try:
             return await self.api.download(audio_url, dest)
         except ApiError as e:
