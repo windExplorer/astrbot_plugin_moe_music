@@ -208,3 +208,6 @@ __marimo__/
 
 # Node
 node_modules/
+
+# 临时文件：提交信息文件（git commit -F 用，提交后即删，勿入库）
+cm_tmp.txt

@@ -2,6 +2,22 @@
 
 本文件记录 astrbot_plugin_moe_music 的版本变更，最新版本在最上方。
 
+## v0.10.5 - 2026-09-12
+
+### 修复
+
+- WebUI 配置页「选歌后撤回候选列表」与插件配置页不一致、开关保存后刷新又变回关闭：该键未加入 WebUI 后端的可编辑白名单（`_EDITABLE_KEYS`），导致读取时被过滤（前端拿不到值 → 按默认关闭渲染）、保存时被静默丢弃（不写入 AstrBotConfig）。现已加入白名单，读写恢复正常。
+- 顺带加固：启动注册路由时校验 `_conf_schema.json` 顶层键与可编辑白名单的一致性，发现遗漏立即输出 warning（列出键名），避免新增配置项再次出现「WebUI 看不到 / 改了不生效」。
+- **撤回候选列表失效的根因（图片菜单模式）**：候选列表图片经协议端直发时，图片消息段的 `file` 字段漏了 `base64://` 前缀（只放了裸 base64），协议端把它当成文件路径去查找，回 `ActionFailed retcode=1200 未知文件类型或路径不存在` → 直发失败降级通用发送 → 拿不到 message_id → 永远撤回不了（且原先只有一行不醒目的日志）。现按 AstrBot 官方实现补上 `base64://` 前缀。
+- 另修平台判断：原先用 `isinstance(event, AiocqhttpMessageEvent)`——插件以包形式加载时，插件 `import` 的 astrbot 模块与框架运行时未必是同一个模块对象，isinstance 可能恒为 `False`，撤回分支会静默跳过。现改为鸭子类型判断（探测 `bot` 上有没有 `call_action`），与 astrbot-comfyui-anima 的做法一致；音乐卡片的平台判断同样去掉 isinstance（原先会一起静默失效、导致卡片恒定降级为语音/文件）。
+- 同链路加固（协议端调用与响应解析过于脆弱，任何一环不符都会「消息照发但拿不到 message_id」）：
+  1. 原只走 `event.bot.api.call_action`，而 AstrBot 官方 aiocqhttp 适配器用的是 `bot.call_action`；现优先 `bot.call_action`、回退 `bot.api.call_action`（新增 `core/onebot.py` 统一封装，音乐卡片发送同步复用）；
+  2. 原只认扁平响应 `{"message_id": ...}`，协议端返回 `{"data": {"message_id": ...}}` 时同样取不到 id；现两种结构都兼容，字符串 id 自动归一为数字；
+  3. 群号 / QQ 号统一归一为 int（部分协议端只认数字类型，传字符串会直接报错降级）；
+  4. 直发成功但没拿到 id 时不再降级重发候选列表（原先会重复发一份）；
+  5. 日志补全：撤回成功 info、失败 warning；候选列表发送时即记下「能否撤回」的结论，撤回失败时**同一条日志直接带出原因**（协议端响应原文 / 开关状态 / 平台能力），不必再去翻发送那一刻的旧日志，不再有静默路径。
+  6. 兜底反查：实机日志（AstrBot 4.28 + aiocqhttp）证实「消息直发成功、但协议端响应里没有 message_id」时撤回彻底无从下手。现改为紧接着反查一次最近消息历史（`get_group_msg_history` / `get_friend_msg_history`），取「发送者是机器人自己、且 60 秒内」的最新一条作为撤回目标；`message_id` 键名也兼容 `msg_id` / `messageId`。拿不到机器人自身 QQ 号、或协议端不支持 history API 时安全放弃——宁可漏撤回，绝不误撤回他人消息。
+
 ## v0.10.4 - 2026-09-12
 
 ### 修复

@@ -15,14 +15,12 @@ from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.message_components import File, Image, Plain, Record
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
 
 from .api_client import ApiError, MusicApiClient, guess_audio_ext
 from .config import PluginConfig
 from .metadata import embed_metadata
 from .model import Track, quality_rank
+from .onebot import call_action_of, to_onebot_id
 
 # 非法文件名字符
 _FILENAME_STRIP = re.compile(r'[\\/:*?"<>|\r\n\t]')
@@ -199,9 +197,11 @@ class SongSender:
         return False
 
     async def _send_card(self, event, track: Track, audio_url: str, cover_url: str) -> bool:
-        """OneBot 音乐卡片（仅 aiocqhttp 平台）。"""
-        if not isinstance(event, AiocqhttpMessageEvent):
-            return False
+        """OneBot 音乐卡片。
+
+        平台判断不看 isinstance（插件与框架的 astrbot 模块未必同一对象，会恒 False），
+        直接探测协议端 call_action 是否可用，与撤回链路同一套判断。
+        """
         if not audio_url:
             return False
         payloads: dict = {
@@ -219,13 +219,23 @@ class SongSender:
                 }
             ]
         }
+        ca = call_action_of(event)
+        if ca is None:
+            logger.warning("[萌音点歌] 当前平台不支持协议端直发，跳过音乐卡片")
+            return False
         try:
             if event.is_private_chat():
-                payloads["user_id"] = event.get_sender_id()
-                await event.bot.api.call_action("send_private_msg", **payloads)
+                await ca(
+                    "send_private_msg",
+                    user_id=to_onebot_id(event.get_sender_id()),
+                    **payloads,
+                )
             else:
-                payloads["group_id"] = event.get_group_id()
-                await event.bot.api.call_action("send_group_msg", **payloads)
+                await ca(
+                    "send_group_msg",
+                    group_id=to_onebot_id(event.get_group_id()),
+                    **payloads,
+                )
             return True
         except Exception as e:
             logger.warning(f"[萌音点歌] 音乐卡片发送失败（客户端可能不支持）：{type(e).__name__}: {e}")

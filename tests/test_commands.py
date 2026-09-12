@@ -359,6 +359,34 @@ class TestSelectionDisplay:
             chain = next(item[1] for item in event.sent if item[0] == "chain")
             assert any(isinstance(seg, img_comp) for seg in chain)
 
+    async def test_image_mode_segment_has_base64_scheme(self):
+        """图片菜单经协议端直发时 file 必须是 ``base64://`` 形式。
+
+        裸 base64 会被协议端当成文件路径，报 retcode=1200「未知文件类型或路径不存在」
+        ——v0.10.5 图片菜单模式下撤回彻底失效的根因。
+        """
+        from aiohttp import web as _web
+
+        cover = _tiny_jpeg_bytes()
+
+        async def cover_handler(request):
+            return _web.Response(body=cover, content_type="image/jpeg")
+
+        async with FakeBackend(
+            search_result=[track_json(1, "http://h/1.jpg"), track_json(2, "http://h/2.jpg")],
+            extra_routes={"/1.jpg": cover_handler, "/2.jpg": cover_handler},
+        ) as api:
+            service = make_service(api, {"selection_display": "image(图片菜单)"})
+            event = _AiocqMockEvent(message_str="1")
+            await service.handle_song_request(event, "晴天")
+            sends = [p for a, p in event.actions if a == "send_group_msg"]
+            assert sends, "图片候选列表应经协议端直发"
+            seg = sends[0]["message"][0]
+            assert seg["type"] == "image"
+            assert seg["data"]["file"].startswith("base64://")
+            # 拿到 message_id → 选歌后撤回成功
+            assert [a for a, _ in event.actions].count("delete_msg") == 1
+
     async def test_image_mode_falls_back_on_render_error(self):
         async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
             service = make_service(api, {"selection_display": "image"})
@@ -600,8 +628,21 @@ _AiocqStub = sys.modules[
 ].AiocqhttpMessageEvent
 
 
+class _OneBotBot:
+    """模拟协议端 bot：暴露 call_action 并记录调用（与官方适配器结构一致）。"""
+
+    def __init__(self, outer):
+        self.outer = outer
+
+    async def call_action(self, action, **payload):
+        self.outer.actions.append((action, payload))
+        if action in ("send_group_msg", "send_private_msg"):
+            return self.outer.send_result
+        return {}
+
+
 class _AiocqMockEvent(MockEvent, _AiocqStub):
-    """带 OneBot bot 的 mock 事件：继承 stub 的 aiocqhttp 事件类以通过 isinstance 判断。
+    """带 OneBot bot 的 mock 事件。
 
     platform_name 故意设为自定义值（"napcat"），验证不再依赖平台名字符串。
     """
@@ -610,19 +651,22 @@ class _AiocqMockEvent(MockEvent, _AiocqStub):
         super().__init__(**kwargs)
         self._platform_name = "napcat"  # 用户自定义的平台名
         self.actions: list[tuple] = []
+        self.send_result: dict = {"message_id": 4321}
+        self.bot = _OneBotBot(self)
 
-        class Api:
-            def __init__(self, outer):
-                self.outer = outer
 
-            async def call_action(self, action, **payload):
-                self.outer.actions.append((action, payload))
-                if action in ("send_group_msg", "send_private_msg"):
-                    return {"message_id": 4321}
-                return {}
+class _DuckTypedMockEvent(MockEvent):
+    """不继承 AiocqhttpMessageEvent、但有 OneBot bot 的事件。
 
-        self.bot = type("Bot", (), {})()
-        self.bot.api = Api(self)
+    回归用：平台判断必须走「能不能 call_action」的鸭子类型，而不是 isinstance——
+    插件与框架的 astrbot 模块不是同一对象时 isinstance 会恒为 False，撤回会完全静默失效。
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.actions: list[tuple] = []
+        self.send_result: dict = {"message_id": 4321}
+        self.bot = _OneBotBot(self)
 
 
 class TestRecallCandidate:
@@ -670,6 +714,73 @@ class TestRecallCandidate:
             assert "delete_msg" not in actions  # 开关关闭：不撤回
             # 候选列表也不必走 call_action（走通用发送）
             assert "send_group_msg" not in actions
+
+    async def test_recall_without_isinstance_subclass(self):
+        """事件类不是 AiocqhttpMessageEvent 子类、但有 OneBot bot：必须照样能撤回。
+
+        这是「完全没撤回且无任何日志」的根因回归——平台判断走鸭子类型而非 isinstance。
+        """
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _DuckTypedMockEvent(message_str="2")
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert "send_group_msg" in actions  # 走了协议端直发
+            assert actions.count("delete_msg") == 1  # 候选列表已撤回
+
+    async def test_recall_with_legacy_bot_api(self):
+        """旧版 bot 只在 bot.api 上暴露 call_action：回退路径同样要能撤回。"""
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _AiocqMockEvent(message_str="2")
+            legacy = type("LegacyBot", (), {})()
+            legacy.api = event.bot  # call_action 挪到 bot.api 下
+            event.bot = legacy
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert actions.count("delete_msg") == 1
+
+    async def test_recall_with_nested_message_id(self):
+        """协议端把 message_id 放在 data 里：也要能取到并用同一 id 撤回。"""
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _AiocqMockEvent(message_str="2")
+            event.send_result = {"status": "ok", "data": {"message_id": "987654"}}
+            await service.handle_song_request(event, "晴天")
+            recalls = [p for a, p in event.actions if a == "delete_msg"]
+            assert recalls == [{"message_id": 987654}]  # 字符串 id 已归一为 int
+
+    async def test_no_duplicate_list_when_id_missing(self):
+        """直发成功但协议端没回 message_id：不能再降级重发一份候选列表。"""
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _AiocqMockEvent(message_str="2")
+            event.send_result = {}
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert "send_group_msg" in actions  # 已直发
+            assert "delete_msg" not in actions  # 没 id，撤回不了
+            texts = [item[1] for item in event.sent if item[0] == "plain"]
+            assert not any("回复序号点歌" in t for t in texts)
+
+    async def test_diag_recorded_when_disabled(self):
+        """开关关闭时诊断结论应为「配置已关闭」——撤回日志据此直说原因。"""
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api, recall_candidate=False)
+            event = _AiocqMockEvent(message_str="1")
+            await service.handle_song_request(event, "晴天")
+            diag = service._candidate_diag[event.unified_msg_origin]
+            assert "recall_candidate 已关闭" in diag
+
+    async def test_diag_recorded_when_id_missing(self):
+        """协议端没回 message_id 时，诊断结论要带上响应内容，便于一次定位。"""
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _AiocqMockEvent(message_str="1")
+            event.send_result = {}
+            await service.handle_song_request(event, "晴天")
+            diag = service._candidate_diag[event.unified_msg_origin]
+            assert "无 message_id" in diag
 
     async def test_non_aiocqhttp_skips_recall(self):
         async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:

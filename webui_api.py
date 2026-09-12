@@ -100,6 +100,7 @@ _EDITABLE_KEYS = {
     "queue_max_pending",
     "enable_lyrics",
     "embed_metadata",
+    "recall_candidate",
     "proxy",
     "enable_self_test",
     "whitelist_groups",
@@ -359,6 +360,28 @@ class MoeWebUIApi:
         return json_response({"saved": True, "applied": sorted(clean)})
 
 
+def _schema_top_keys() -> set[str]:
+    """读取 _conf_schema.json 的顶层配置键。"""
+    try:
+        path = Path(__file__).parent / "_conf_schema.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return set(data.keys()) if isinstance(data, dict) else set()
+    except Exception:
+        return set()
+
+
+def warn_schema_keys_not_editable() -> list[str]:
+    """schema 里存在、但未加入 _EDITABLE_KEYS 的键。
+
+    这类键 WebUI 读不到（前端显示默认值）、改了也不会落库——v0.10.4 的
+    recall_candidate 就因此表现为「开关保存后刷新又变回关闭」。返回缺失键列表。
+    """
+    missing = sorted(_schema_top_keys() - _EDITABLE_KEYS)
+    if missing:
+        logger.warning(f"[萌音点歌] 以下配置项未加入 WebUI 可编辑白名单，改后不生效：{missing}")
+    return missing
+
+
 def _q_str(name: str, default: str) -> str:
     try:
         v = request.query.get(name, default)
@@ -420,6 +443,7 @@ def register_web_api(plugin) -> None:
     """
     global _active_plugin
     _active_plugin = plugin
+    warn_schema_keys_not_editable()
     ctx = plugin.context
     prefix = f"/{PLUGIN_NAME}"
     routes = [

@@ -13,9 +13,6 @@ import traceback
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
 from astrbot.core.utils.session_waiter import (
     SessionController,
     SessionFilter,
@@ -27,6 +24,7 @@ from .api_client import ApiError, MusicApiClient
 from .config import COMMAND_SOURCE_ALIAS, PluginConfig
 from .lyrics_render import LyricsRenderer
 from .model import Track
+from .onebot import call_action_of, message_id_payload, send_message_via_onebot
 from .sender import SongSender, send_lyrics_image
 from .songlist_render import SonglistRenderer
 from .storage import RecordStore
@@ -46,7 +44,13 @@ def _is_song_command_text(text: str) -> bool:
 
 
 def _bytes_to_b64(data: bytes) -> str:
-    return base64.b64encode(data).decode()
+    """图片消息段的 file 字段值。
+
+    必须带 ``base64://`` 前缀（AstrBot 官方实现同此）：裸 base64 会被协议端当成
+    文件路径去查找，直接报 retcode=1200「未知文件类型或路径不存在」——这正是
+    图片菜单模式下候选列表拿不到 message_id、进而无法自动撤回的根因。
+    """
+    return "base64://" + base64.b64encode(data).decode()
 
 
 class MoeMusicService:
@@ -73,6 +77,21 @@ class MoeMusicService:
         self.store = store
         self.access = access
         self.queue = queue  # SongTaskQueue；None 表示直通执行（测试/降级）
+        # 会话 -> 最近一次候选列表「能否被撤回」的结论（撤回失败时输出，免翻旧日志）
+        self._candidate_diag: dict[str, str] = {}
+
+    def _note_candidate_diag(self, event: AstrMessageEvent, reason: str) -> None:
+        """记下本次候选列表的撤回可行性结论（按会话维度）。"""
+        try:
+            self._candidate_diag[event.unified_msg_origin] = reason
+        except Exception:
+            pass
+
+    def _candidate_diag_of(self, event: AstrMessageEvent) -> str:
+        try:
+            return self._candidate_diag.get(event.unified_msg_origin, "未记录")
+        except Exception:
+            return "未记录"
 
     async def _run_task(self, fn, *args, **kwargs):
         """任务入队执行（排队耗时由 worker 注入 fn 的 queue_wait_ms 参数）；队满抛 QueueFull。"""
@@ -272,76 +291,97 @@ class MoeMusicService:
 
     async def _send_candidate_list(
         self, event: AstrMessageEvent, keyword: str, tracks: list[Track]
-    ) -> int | None:
+    ) -> int | str | None:
         """发送候选列表：图片菜单（带封面）或文本列表，图片失败自动回退文本。
 
-        aiocqhttp 平台经 call_action 发送以拿到 message_id（供选歌结束后撤回）；
+        aiocqhttp 平台经协议端 call_action 发送以拿到 message_id（供选歌结束后撤回）；
         其他平台走通用发送，返回 None（无法撤回）。
         """
+        diag: dict = {}
         recallable = self.cfg.recall_candidate and self._is_aiocqhttp(event)
-        if self.cfg.selection_display == "image":
-            try:
-                image_bytes = await self._render_candidate_image(keyword, tracks)
-            except Exception:
-                logger.warning(f"[萌音点歌] 候选列表图片渲染失败，回退文本：\n{traceback.format_exc()}")
-            else:
-                if recallable:
-                    message_id = await self._send_onebot_message(
-                        event, [{"type": "image", "data": {"file": _bytes_to_b64(image_bytes)}}]
+        if not recallable:
+            diag["reason"] = (
+                "配置中 recall_candidate 已关闭"
+                if not self.cfg.recall_candidate
+                else "当前平台不支持协议端 call_action（非 OneBot）"
+            )
+            logger.info(f"[萌音点歌] 候选列表本次不自动撤回：{diag['reason']}")
+        try:
+            if self.cfg.selection_display == "image":
+                try:
+                    image_bytes = await self._render_candidate_image(keyword, tracks)
+                except Exception:
+                    logger.warning(
+                        f"[萌音点歌] 候选列表图片渲染失败，回退文本：\n{traceback.format_exc()}"
                     )
-                    if message_id:
-                        return int(message_id)
-                await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
-                return None
+                else:
+                    if recallable:
+                        sent, message_id = await send_message_via_onebot(
+                            event,
+                            [{"type": "image", "data": {"file": _bytes_to_b64(image_bytes)}}],
+                            diag,
+                        )
+                        if sent:
+                            return message_id  # 已发出：即使没拿到 id 也不能重发一遍
+                    await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
+                    return None
 
-        lines = [f"为【{keyword}】找到 {len(tracks)} 首，回复序号点歌（回复“取消”退出）："]
-        for i, track in enumerate(tracks, 1):
-            duration = f" [{track.duration_text()}]" if track.duration_text() else ""
-            lines.append(f"{i}. {track.display}（{track.source_name}）{duration}")
-        text = "\n".join(lines)
-        if recallable:
-            message_id = await self._send_onebot_message(event, [{"type": "text", "data": {"text": text}}])
-            if message_id:
-                return int(message_id)
-        await event.send(event.plain_result(text))
-        return None
+            lines = [f"为【{keyword}】找到 {len(tracks)} 首，回复序号点歌（回复“取消”退出）："]
+            for i, track in enumerate(tracks, 1):
+                duration = f" [{track.duration_text()}]" if track.duration_text() else ""
+                lines.append(f"{i}. {track.display}（{track.source_name}）{duration}")
+            text = "\n".join(lines)
+            if recallable:
+                sent, message_id = await send_message_via_onebot(
+                    event, [{"type": "text", "data": {"text": text}}], diag
+                )
+                if sent:
+                    return message_id
+            await event.send(event.plain_result(text))
+            return None
+        finally:
+            # 无论走哪条分支都留下结论，撤回时可直接说明「为什么撤不了」
+            self._note_candidate_diag(event, diag.get("reason", "正常（可撤回）"))
 
     @staticmethod
     def _is_aiocqhttp(event: AstrMessageEvent) -> bool:
-        """是否为 OneBot(aiocqhttp) 平台且具备 bot 客户端（可 call_action）。
+        """是否具备 OneBot 协议端调用能力（能 call_action，撤回/卡片都依赖它）。
 
-        注意不能用 get_platform_name() == "aiocqhttp" 判断：那返回的是用户在
-        平台配置里自定义的名称（可能是 napcat / qq 等），与适配器类型无关。
+        两件事都不能做：
+        - 不能用 ``get_platform_name() == "aiocqhttp"``：那返回的是用户在平台配置里
+          自定义的名称（可能是 napcat / qq 等），与适配器类型无关；
+        - 也不能只靠 ``isinstance(event, AiocqhttpMessageEvent)``：插件以包形式加载时，
+          插件 import 的 astrbot 模块与框架运行时未必是同一个模块对象，isinstance 可能
+          恒为 False，且完全静默——撤回与音乐卡片会一起失效、日志里什么都看不到。
+
+        直接探测 bot 是否提供 call_action 最可靠（astrbot-comfyui-anima 同做法）。
         """
-        return isinstance(event, AiocqhttpMessageEvent) and getattr(event, "bot", None) is not None
+        return call_action_of(event) is not None
 
-    async def _send_onebot_message(self, event: AstrMessageEvent, message: list[dict]) -> int | None:
-        """经 OneBot 直接发送消息段，返回 message_id；失败返回 None（调用方降级通用发送）。"""
-        try:
-            bot = event.bot
-            if event.is_private_chat():
-                result = await bot.api.call_action(
-                    "send_private_msg", user_id=event.get_sender_id(), message=message
-                )
-            else:
-                result = await bot.api.call_action(
-                    "send_group_msg", group_id=event.get_group_id(), message=message
-                )
-            return result.get("message_id") if isinstance(result, dict) else None
-        except Exception as e:
-            logger.warning(f"[萌音点歌] OneBot 直发失败，降级通用发送：{type(e).__name__}: {e}")
-            return None
+    async def _recall_message(self, event: AstrMessageEvent, message_id) -> None:
+        """撤回候选列表消息（仅 aiocqhttp）；失败记 warning（可能权限不足或消息已删）。
 
-    async def _recall_message(self, event: AstrMessageEvent, message_id: int | None) -> None:
-        """撤回候选列表消息（仅 aiocqhttp）；失败记 warning（可能权限不足或消息已删）。"""
-        if not message_id or not self.cfg.recall_candidate or not self._is_aiocqhttp(event):
+        QQ 群机器人撤回自身消息有时间窗限制（约 2 分钟），超时后撤回必然失败，属预期。
+        """
+        if not self.cfg.recall_candidate:
             return
+        if not message_id:
+            logger.warning(
+                "[萌音点歌] 候选列表没有可用的 message_id，无法自动撤回"
+                f"（原因：{self._candidate_diag_of(event)}）"
+            )
+            return
+        ca = call_action_of(event)
+        if ca is None:
+            logger.warning("[萌音点歌] 当前平台没有 call_action（非 OneBot），无法撤回候选列表")
+            return
+        mid = str(message_id)
         try:
-            await event.bot.api.call_action("delete_msg", message_id=message_id)
-            logger.debug(f"[萌音点歌] 已撤回候选列表消息：{message_id}")
+            await ca("delete_msg", message_id=message_id_payload(mid))
+            logger.info(f"[萌音点歌] 已撤回候选列表消息：{mid}")
         except Exception as e:
             logger.warning(
-                f"[萌音点歌] 撤回候选列表失败（消息可能已被删除或协议端不支持）：{type(e).__name__}: {e}"
+                f"[萌音点歌] 撤回候选列表失败（消息可能已被删除/超时或协议端不支持）：{type(e).__name__}: {e}"
             )
 
     async def _render_candidate_image(self, keyword: str, tracks: list[Track]) -> bytes:
@@ -364,7 +404,7 @@ class MoeMusicService:
         event: AstrMessageEvent,
         tracks: list[Track],
         record_base: dict,
-        candidate_id: int | None = None,
+        candidate_id: int | str | None = None,
         flow_start: float | None = None,
     ) -> None:
         """session_waiter 等待用户回复序号；结束后撤回候选列表（选中/取消/超范围/超时）。"""

@@ -165,6 +165,24 @@ class TestConfig:
         assert plugin.applied == {"song_limit": 9}  # 非白名单键被过滤
         assert plugin.config["song_limit"] == 9
 
+    async def test_recall_candidate_roundtrip(self, tmp_path: Path):
+        """v0.10.5 修复：recall_candidate 漏在白名单外 → 读不到、保存被静默过滤。"""
+        api, _, plugin = make_api(tmp_path)
+        plugin.config["recall_candidate"] = True
+        _, value, _ = await api.get_config()
+        assert value["recall_candidate"] is True  # 读得到（否则前端显示默认关闭）
+
+        stub_request_json({"recall_candidate": False})
+        _, res, _ = await api.save_config()
+        assert res["saved"] is True
+        assert plugin.applied == {"recall_candidate": False}  # 保存不被过滤
+
+    async def test_schema_keys_all_editable(self):
+        """schema 的每个顶层键都必须可被 WebUI 读写（防再次漏加白名单）。"""
+        from astrbot_plugin_moe_music.webui_api import warn_schema_keys_not_editable
+
+        assert warn_schema_keys_not_editable() == []
+
     async def test_save_config_rejects_empty(self, tmp_path: Path):
         api, _, _ = make_api(tmp_path)
         stub_request_json({})
