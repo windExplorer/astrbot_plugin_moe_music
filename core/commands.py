@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import base64
 import time
 import traceback
 
@@ -39,6 +40,10 @@ def _is_song_command_text(text: str) -> bool:
     """判断一条消息是否是新的点歌命令（用于等待选号时的重复点歌提示）。"""
     cmd = text.strip().partition(" ")[0].strip().lower()
     return cmd in COMMAND_SOURCE_ALIAS
+
+
+def _bytes_to_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
 
 
 class MoeMusicService:
@@ -232,10 +237,10 @@ class MoeMusicService:
             )
             return
 
-        await self._send_candidate_list(event, keyword, tracks)
+        candidate_id = await self._send_candidate_list(event, keyword, tracks)
         if warned:
             logger.debug(f"[萌音点歌] 命令序号超范围，已引导重新选择：{index_hint}")
-        await self._wait_for_selection(event, tracks, record_base)
+        await self._wait_for_selection(event, tracks, record_base, candidate_id)
 
     async def _send_via_queue(self, event, track: Track, record_ctx: dict) -> bool:
         """发送任务入队（排队耗时记入 play_records.queue_wait_ms）；队满时提示繁忙。"""
@@ -252,21 +257,73 @@ class MoeMusicService:
             await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
             return False
 
-    async def _send_candidate_list(self, event: AstrMessageEvent, keyword: str, tracks: list[Track]) -> None:
-        """发送候选列表：图片菜单（带封面）或文本列表，图片失败自动回退文本。"""
+    async def _send_candidate_list(
+        self, event: AstrMessageEvent, keyword: str, tracks: list[Track]
+    ) -> int | None:
+        """发送候选列表：图片菜单（带封面）或文本列表，图片失败自动回退文本。
+
+        aiocqhttp 平台经 call_action 发送以拿到 message_id（供选歌结束后撤回）；
+        其他平台走通用发送，返回 None（无法撤回）。
+        """
+        recallable = self.cfg.recall_candidate and self._is_aiocqhttp(event)
         if self.cfg.selection_display == "image":
             try:
                 image_bytes = await self._render_candidate_image(keyword, tracks)
-                await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
-                return
             except Exception:
                 logger.warning(f"[萌音点歌] 候选列表图片渲染失败，回退文本：\n{traceback.format_exc()}")
+            else:
+                if recallable:
+                    message_id = await self._send_onebot_message(
+                        event, [{"type": "image", "data": {"file": _bytes_to_b64(image_bytes)}}]
+                    )
+                    if message_id:
+                        return int(message_id)
+                await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
+                return None
 
         lines = [f"为【{keyword}】找到 {len(tracks)} 首，回复序号点歌（回复“取消”退出）："]
         for i, track in enumerate(tracks, 1):
             duration = f" [{track.duration_text()}]" if track.duration_text() else ""
             lines.append(f"{i}. {track.display}（{track.source_name}）{duration}")
-        await event.send(event.plain_result("\n".join(lines)))
+        text = "\n".join(lines)
+        if recallable:
+            message_id = await self._send_onebot_message(event, [{"type": "text", "data": {"text": text}}])
+            if message_id:
+                return int(message_id)
+        await event.send(event.plain_result(text))
+        return None
+
+    @staticmethod
+    def _is_aiocqhttp(event: AstrMessageEvent) -> bool:
+        """是否为 OneBot 平台且具备 bot 客户端（可 call_action）。"""
+        return event.get_platform_name() == "aiocqhttp" and getattr(event, "bot", None) is not None
+
+    async def _send_onebot_message(self, event: AstrMessageEvent, message: list[dict]) -> int | None:
+        """经 OneBot 直接发送消息段，返回 message_id；失败返回 None（调用方降级通用发送）。"""
+        try:
+            bot = event.bot
+            if event.is_private_chat():
+                result = await bot.api.call_action(
+                    "send_private_msg", user_id=event.get_sender_id(), message=message
+                )
+            else:
+                result = await bot.api.call_action(
+                    "send_group_msg", group_id=event.get_group_id(), message=message
+                )
+            return result.get("message_id") if isinstance(result, dict) else None
+        except Exception as e:
+            logger.warning(f"[萌音点歌] OneBot 直发失败，降级通用发送：{type(e).__name__}: {e}")
+            return None
+
+    async def _recall_message(self, event: AstrMessageEvent, message_id: int | None) -> None:
+        """撤回候选列表消息（仅 aiocqhttp）；失败静默（可能已被手动删除或权限不足）。"""
+        if not message_id or not self.cfg.recall_candidate or not self._is_aiocqhttp(event):
+            return
+        try:
+            await event.bot.api.call_action("delete_msg", message_id=message_id)
+            logger.debug(f"[萌音点歌] 已撤回候选列表消息：{message_id}")
+        except Exception as e:
+            logger.debug(f"[萌音点歌] 撤回候选列表失败（忽略）：{type(e).__name__}: {e}")
 
     async def _render_candidate_image(self, keyword: str, tracks: list[Track]) -> bytes:
         """并行下载候选封面后渲染图片菜单。"""
@@ -284,9 +341,9 @@ class MoeMusicService:
         return await self.songlist_renderer.render_async(keyword, tracks, covers, timeout=self.cfg.timeout)
 
     async def _wait_for_selection(
-        self, event: AstrMessageEvent, tracks: list[Track], record_base: dict
+        self, event: AstrMessageEvent, tracks: list[Track], record_base: dict, candidate_id: int | None = None
     ) -> None:
-        """session_waiter 等待用户回复序号。"""
+        """session_waiter 等待用户回复序号；结束后撤回候选列表（选中/取消/超范围/超时）。"""
 
         @session_waiter(timeout=self.cfg.timeout, record_history_chains=False)
         async def song_picker(controller: SessionController, ev: AstrMessageEvent):
@@ -294,6 +351,7 @@ class MoeMusicService:
             if text in ("取消", "算了", "退出", "q", "Q"):
                 controller.stop()
                 ev.stop_event()
+                await self._recall_message(ev, candidate_id)
                 await ev.send(ev.plain_result("好的，已取消点歌～"))
                 return
             if _is_song_command_text(text):
@@ -309,6 +367,7 @@ class MoeMusicService:
             if not (1 <= n <= len(tracks)):
                 controller.stop()
                 ev.stop_event()
+                await self._recall_message(ev, candidate_id)
                 await ev.send(ev.plain_result("序号超出范围啦，本次点歌已结束～"))
                 return
             controller.stop()
@@ -316,14 +375,17 @@ class MoeMusicService:
             await self._send_via_queue(
                 ev, tracks[n - 1], record_ctx={**record_base, "selected_index": n, "selection_type": "picked"}
             )
+            await self._recall_message(ev, candidate_id)
 
         try:
             await song_picker(event, _UserSessionFilter())
         except TimeoutError:
             logger.info(f"[萌音点歌] 选歌超时（{self.cfg.timeout}s）")
+            await self._recall_message(event, candidate_id)
             await event.send(event.plain_result("点歌超时啦，请重新点歌～"))
         except Exception:
             logger.error(f"[萌音点歌] 选歌等待异常：\n{traceback.format_exc()}")
+            await self._recall_message(event, candidate_id)
             await event.send(event.plain_result("点歌出了点小问题，请重新试试吧～"))
 
     # ============ 查歌词 ============

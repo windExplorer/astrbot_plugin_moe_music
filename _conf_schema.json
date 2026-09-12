@@ -119,6 +119,12 @@
         "type": "bool",
         "default": true
     },
+    "recall_candidate": {
+        "description": "选歌后撤回候选列表",
+        "hint": "用户选完歌（或取消/超时）后自动撤回之前发送的候选列表消息，减少刷屏。仅 QQ(aiocqhttp) 平台可用，其他平台自动忽略",
+        "type": "bool",
+        "default": true
+    },
     "proxy": {
         "description": "网络代理",
         "hint": "访问音乐后端使用的代理，如 http://127.0.0.1:7890，留空直连",

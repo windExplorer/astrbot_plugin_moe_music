@@ -592,3 +592,79 @@ class TestPickerRejection:
             # stub 的 session_waiter 会立即消费一条消息：应收到「进行中」提示
             hints = [item[1] for item in event.sent if item[0] == "plain" and "进行中" in item[1]]
             assert hints, "应提示还有一单点歌进行中"
+
+
+class _AiocqMockEvent(MockEvent):
+    """带 OneBot bot 的 mock 事件：记录 call_action 调用与返回 message_id。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.actions: list[tuple] = []
+
+        class Api:
+            def __init__(self, outer):
+                self.outer = outer
+
+            async def call_action(self, action, **payload):
+                self.outer.actions.append((action, payload))
+                if action in ("send_group_msg", "send_private_msg"):
+                    return {"message_id": 4321}
+                return {}
+
+        self.bot = type("Bot", (), {})()
+        self.bot.api = Api(self)
+
+
+class TestRecallCandidate:
+    """选歌结束后自动撤回候选列表（v0.8.0）。"""
+
+    def _make(self, api, **cfg):
+        from astrbot_plugin_moe_music.core.access import AccessController
+        from astrbot_plugin_moe_music.core.songlist_render import SonglistRenderer
+
+        c = PluginConfig.from_astrbot_config(
+            {"api_key": "sk-test", "send_modes": ["text"], "timeout": 5, **cfg}
+        )
+        sender = SongSender(c, api, Path(__file__).parent / "_tmp_downloads")
+        font = Path(__file__).resolve().parent.parent / "fonts" / "simhei.ttf"
+        service = MoeMusicService(
+            c, api, sender, LyricsRenderer(font), SonglistRenderer(font), access=AccessController(c)
+        )
+        return service
+
+    async def test_recall_after_pick(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            service.sender.store = None
+            event = _AiocqMockEvent(message_str="2")  # 等待中直接回序号 2
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert actions.count("delete_msg") == 1  # 候选列表已撤回
+            # 候选列表经 call_action 直发（拿 message_id）
+            assert "send_group_msg" in actions
+
+    async def test_recall_on_cancel(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = _AiocqMockEvent(message_str="取消")
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert "delete_msg" in actions
+
+    async def test_no_recall_when_disabled(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api, recall_candidate=False)
+            event = _AiocqMockEvent(message_str="1")
+            await service.handle_song_request(event, "晴天")
+            actions = [a for a, _ in event.actions]
+            assert "delete_msg" not in actions  # 开关关闭：不撤回
+            # 候选列表也不必走 call_action（走通用发送）
+            assert "send_group_msg" not in actions
+
+    async def test_non_aiocqhttp_skips_recall(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = self._make(api)
+            event = MockEvent(message_str="1")  # 无 bot 的通用事件
+            await service.handle_song_request(event, "晴天")
+            # 不报错、正常发送即可（无撤回能力）
+            assert any("chain" in item[0] or "plain" in item[0] for item in event.sent)

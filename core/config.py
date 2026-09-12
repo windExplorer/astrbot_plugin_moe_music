@@ -67,6 +67,7 @@ class PluginConfig:
     queue_max_pending: int = 20  # 等待队列上限，队满直接拒绝
     enable_lyrics: bool = False
     embed_metadata: bool = True  # 文件模式嵌入封面/歌词/标题等元数据
+    recall_candidate: bool = True  # 选歌结束后撤回候选列表（仅 aiocqhttp 可用）
     proxy: str = ""
     enable_self_test: bool = True
     # 访问控制：白名单优先于黑名单；两者都为空时不限制
@@ -137,6 +138,7 @@ class PluginConfig:
             queue_max_pending=_int_opt("queue_max_pending", 20, 5, 50),
             enable_lyrics=bool(config.get("enable_lyrics", False)),
             embed_metadata=bool(config.get("embed_metadata", True)),
+            recall_candidate=bool(config.get("recall_candidate", True)),
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),
             whitelist_groups=_str_list("whitelist_groups"),

@@ -160,8 +160,16 @@ class TestTasksSnapshot:
         play = snap["plays"][0]
         # 前端 TasksView 歌曲列/音源/方式/来源/排队列所需字段一个不能缺
         for key in (
-            "track_name", "singer", "source", "quality", "send_mode",
-            "trigger_type", "queue_wait_ms", "total_ms", "group_name", "created_at",
+            "track_name",
+            "singer",
+            "source",
+            "quality",
+            "send_mode",
+            "trigger_type",
+            "queue_wait_ms",
+            "total_ms",
+            "group_name",
+            "created_at",
         ):
             assert key in play, f"SSE 快照缺字段：{key}"
         assert play["singer"] == "周杰伦"
