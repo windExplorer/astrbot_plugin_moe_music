@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import datetime as _dt
 import json
 import traceback
 from pathlib import Path
@@ -21,6 +22,64 @@ from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request, stream_response
 
 PLUGIN_NAME = "astrbot_plugin_moe_music"
+
+# 统计范围定义：key -> (显示名, 趋势分桶, 自然单位数)
+# bucket: hour=按整点小时 / day=按日期 / month=按月份
+_RANGE_DEFS = {
+    "today": ("今天", "hour", 1),
+    "24h": ("近一天", "hour", 1),
+    "3d": ("近三天", "day", 3),
+    "7d": ("近一周", "day", 7),
+    "14d": ("近14天", "day", 14),
+    "30d": ("近一月", "day", 30),
+    "90d": ("近90天", "day", 90),
+    "1y": ("近一年", "month", 12),
+}
+
+# 业务枚举中文名（WebUI 展示用）
+SEND_MODE_NAMES = {
+    "card": "音乐卡片",
+    "record_link": "语音链接",
+    "record_local": "本地语音",
+    "file_link": "文件链接",
+    "file_local": "本地文件",
+    "text": "文本链接",
+}
+SELECTION_NAMES = {
+    "direct_index": "命令序号",
+    "single": "单曲直发",
+    "picked": "回复序号",
+    "llm": "AI 点歌",
+}
+TRIGGER_NAMES = {"command": "命令", "llm_tool": "AI"}
+SOURCE_NAMES = {
+    "kw": "酷我",
+    "kg": "酷狗",
+    "tx": "QQ音乐",
+    "wy": "网易云",
+    "mg": "咪咕",
+    "xm": "虾米",
+    "bd": "百度",
+}
+
+
+def _resolve_range(range_key: str) -> tuple[str, str, float]:
+    """解析统计范围，返回 (标准化 key, 分桶方式, 起始 unix 时间戳)。"""
+    key = range_key if range_key in _RANGE_DEFS else "7d"
+    label, bucket, units = _RANGE_DEFS[key]
+    now = _dt.datetime.now()
+    if key == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif key == "24h":
+        start = now - _dt.timedelta(hours=24)
+    elif key == "1y":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        for _ in range(units - 1):
+            start = (start - _dt.timedelta(days=1)).replace(day=1)
+    else:
+        start = (now - _dt.timedelta(days=units - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return key, bucket, start.timestamp()
+
 
 # 配置页允许通过 WebUI 保存的键（与 _conf_schema.json 对齐；未列出的键忽略）
 _EDITABLE_KEYS = {
@@ -60,8 +119,7 @@ class MoeWebUIApi:
     # ============ 统计 ============
 
     async def stats_overview(self):
-        days = _q_int("days", 7, 1, 365)
-        since = _since_ts(days)
+        range_key, _, since = _resolve_range(_q_str("range", "7d"))
         total_search = await self.store.query(
             "SELECT COUNT(*) AS n, "
             "COALESCE(SUM(success), 0) AS ok, "
@@ -78,15 +136,6 @@ class MoeWebUIApi:
             "FROM play_records WHERE ts >= ?",
             (since,),
         )
-        today_start = _since_ts(1)
-        today = {
-            "search": await self.store.query(
-                "SELECT COUNT(*) AS n FROM search_records WHERE ts >= ?", (today_start,)
-            ),
-            "play": await self.store.query(
-                "SELECT COUNT(*) AS n FROM play_records WHERE ts >= ?", (today_start,)
-            ),
-        }
         overall = await self.store.query(
             "SELECT (SELECT COUNT(*) FROM search_records) AS search, "
             "(SELECT COUNT(*) FROM play_records) AS play"
@@ -96,7 +145,8 @@ class MoeWebUIApi:
         embed_applicable = int(p.get("embed_applicable") or 0)
         return json_response(
             {
-                "days": days,
+                "range": range_key,
+                "range_label": _RANGE_DEFS[range_key][0],
                 "search_total": int(s.get("n") or 0),
                 "search_ok": int(s.get("ok") or 0),
                 "search_avg_ms": round(float(s.get("avg_ms") or 0)),
@@ -105,33 +155,40 @@ class MoeWebUIApi:
                 "play_avg_queue_ms": round(float(p.get("avg_queue") or 0)),
                 "quality_fallback": int(p.get("fallback") or 0),
                 "embed_rate": (int(p.get("embedded") or 0) / embed_applicable) if embed_applicable else None,
-                "today_search": int(today["search"][0]["n"]) if today["search"] else 0,
-                "today_play": int(today["play"][0]["n"]) if today["play"] else 0,
                 "overall_search": int(overall[0]["search"]) if overall else 0,
                 "overall_play": int(overall[0]["play"]) if overall else 0,
             }
         )
 
     async def stats_trend(self):
-        days = _q_int("days", 14, 1, 90)
-        since = _since_ts(days)
+        range_key, bucket, since = _resolve_range(_q_str("range", "7d"))
+        if bucket == "hour":
+            expr = "strftime('%Y-%m-%d %H:00', created_at)"
+            keys, labels = _hour_buckets(range_key, since)
+        elif bucket == "month":
+            expr = "strftime('%Y-%m', created_at)"
+            keys, labels = _month_buckets()
+        else:
+            expr = "date(created_at)"
+            keys, labels = _day_buckets(range_key)
+
         search_rows = await self.store.query(
-            "SELECT date(created_at) AS d, COUNT(*) AS n FROM search_records WHERE ts >= ? GROUP BY d",
+            f"SELECT {expr} AS d, COUNT(*) AS n FROM search_records WHERE ts >= ? GROUP BY d",
             (since,),
         )
         play_rows = await self.store.query(
-            "SELECT date(created_at) AS d, COUNT(*) AS n FROM play_records WHERE ts >= ? GROUP BY d",
+            f"SELECT {expr} AS d, COUNT(*) AS n FROM play_records WHERE ts >= ? GROUP BY d",
             (since,),
         )
         search_map = {r["d"]: r["n"] for r in search_rows}
         play_map = {r["d"]: r["n"] for r in play_rows}
-        dates = _date_range(days)
         return json_response(
             {
-                "days": days,
-                "dates": dates,
-                "search": [int(search_map.get(d, 0)) for d in dates],
-                "play": [int(play_map.get(d, 0)) for d in dates],
+                "range": range_key,
+                "bucket": bucket,
+                "dates": labels,
+                "search": [int(search_map.get(k, 0)) for k in keys],
+                "play": [int(play_map.get(k, 0)) for k in keys],
             }
         )
 
@@ -156,8 +213,7 @@ class MoeWebUIApi:
         return json_response({"users": users, "groups": groups, "tracks": tracks})
 
     async def stats_dist(self):
-        days = _q_int("days", 30, 1, 365)
-        since = _since_ts(days)
+        range_key, _, since = _resolve_range(_q_str("range", "30d"))
         quality = await self.store.query(
             "SELECT COALESCE(NULLIF(quality, ''), '未知') AS k, COUNT(*) AS n "
             "FROM play_records WHERE ts >= ? GROUP BY k ORDER BY n DESC",
@@ -190,11 +246,12 @@ class MoeWebUIApi:
         )
         return json_response(
             {
+                "range": range_key,
                 "quality": quality,
-                "send_mode": send_mode,
-                "selection": selection,
-                "trigger": trigger,
-                "source": source,
+                "send_mode": _translate(send_mode, SEND_MODE_NAMES),
+                "selection": _translate(selection, SELECTION_NAMES),
+                "trigger": _translate(trigger, TRIGGER_NAMES),
+                "source": _translate(source, SOURCE_NAMES),
                 "queue_waits": [int(r["v"]) for r in cost],
             }
         )
@@ -280,6 +337,14 @@ class MoeWebUIApi:
         return json_response({"saved": True, "applied": sorted(clean)})
 
 
+def _q_str(name: str, default: str) -> str:
+    try:
+        v = request.query.get(name, default)
+        return str(v) if v else default
+    except Exception:
+        return default
+
+
 def _q_int(name: str, default: int, lo: int, hi: int) -> int:
     try:
         v = request.query.get(name, default, type=int)
@@ -288,18 +353,48 @@ def _q_int(name: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(v)))
 
 
-def _since_ts(days: int) -> float:
-    import time as _time
+def _translate(rows: list[dict], names: dict[str, str]) -> list[dict]:
+    """分布数据的枚举键转中文展示名。"""
+    return [{**r, "k": names.get(r.get("k"), r.get("k"))} for r in rows]
 
-    return _time.time() - days * 86400
+
+def _hour_buckets(range_key: str, since_ts: float) -> tuple[list[str], list[str]]:
+    """小时桶：today 为当天 0-23 点（标签 HH:00）；24h 为最近 24 个整点（标签 MM-DD HH:MM）。"""
+    start = _dt.datetime.fromtimestamp(since_ts).replace(minute=0, second=0, microsecond=0)
+    keys: list[str] = []
+    labels: list[str] = []
+    for i in range(24):
+        t = start + _dt.timedelta(hours=i)
+        if range_key == "today" and t.date() != _dt.date.today():
+            continue
+        keys.append(t.strftime("%Y-%m-%d %H:00"))
+        labels.append(t.strftime("%H:00") if range_key == "today" else t.strftime("%m-%d %H:%M"))
+    return keys, labels
 
 
-def _date_range(days: int) -> list[str]:
-    """最近 N 天的日期列表（本地时区，含今天）。"""
-    import datetime as _dt
-
+def _day_buckets(range_key: str) -> tuple[list[str], list[str]]:
+    units = _RANGE_DEFS[range_key][2]
     today = _dt.date.today()
-    return [(today - _dt.timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+    keys = [(today - _dt.timedelta(days=i)).isoformat() for i in range(units - 1, -1, -1)]
+    labels = [k[5:] for k in keys]  # MM-DD
+    return keys, labels
+
+
+def _month_buckets() -> tuple[list[str], list[str]]:
+    d = _dt.date.today().replace(day=1)
+    months: list[str] = []
+    for _ in range(12):
+        months.append(d.strftime("%Y-%m"))
+        d = (d - _dt.timedelta(days=1)).replace(day=1)
+    return months[::-1], months[::-1]
+
+    async def get_changelog(self):
+        """更新日志（CHANGELOG.md 原文，前端渲染）。"""
+        path = Path(__file__).parent / "CHANGELOG.md"
+        try:
+            return json_response({"content": path.read_text(encoding="utf-8")})
+        except Exception as e:
+            return error_response(f"读取更新日志失败：{e}", status_code=500)
 
 
 def register_web_api(plugin) -> None:
@@ -318,6 +413,7 @@ def register_web_api(plugin) -> None:
         (f"{prefix}/schema", api.get_schema, ["GET"], "读取配置 schema"),
         (f"{prefix}/config", api.get_config, ["GET"], "读取插件配置"),
         (f"{prefix}/config", api.save_config, ["POST"], "保存插件配置"),
+        (f"{prefix}/changelog", api.get_changelog, ["GET"], "更新日志"),
     ]
     registered = 0
     for path, handler, methods, desc in routes:

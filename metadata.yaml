@@ -1,7 +1,7 @@
 name: astrbot_plugin_moe_music
 display_name: 萌音点歌
 desc: 连接自建 lx_music_api 音源后端的点歌插件，支持 QQ 音乐卡片、多模式降级发送、歌词图片与 AI 自然语言点歌。
-version: v0.8.0
+version: v0.9.0
 author: windExplorer
 repo: https://github.com/windExplorer/moe_music.git
 help: 指令：点歌 <歌名> [序号]；网易点歌 / QQ点歌 / 酷狗点歌 / 酷我点歌 / 咪咕点歌 <歌名>；查歌词 <歌名>；点歌自检。也可对 AI 说“放一首 xx 的歌”自动点歌。

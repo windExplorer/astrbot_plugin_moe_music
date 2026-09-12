@@ -1,26 +1,30 @@
 <script setup lang="ts">
-/** 统计页：汇总卡片 + 趋势折线 + 分布饼图 + 排行榜。 */
+/** 统计页：汇总卡片 + 趋势面积图 + 分布饼图 + 排行榜（范围：今天~近一年）。 */
 import { computed, onMounted, ref, watch } from "vue";
-import { NCard, NGrid, NGridItem, NSelect, NStatistic, NSpin, NTabPane, NTabs, useMessage } from "naive-ui";
+import { NButton, NCard, NGrid, NGridItem, NSelect, NStatistic, NSpin, NTabPane, NTabs, useMessage } from "naive-ui";
 import { apiGet } from "../bridge";
 import Chart from "../components/Chart.vue";
 
 const msg = useMessage();
-const days = ref(14);
+const range = ref("7d");
 const loading = ref(false);
 const overview = ref<Record<string, any> | null>(null);
-const trend = ref<{ dates: string[]; search: number[]; play: number[] } | null>(null);
+const trend = ref<{ bucket: string; dates: string[]; search: number[]; play: number[] } | null>(null);
 const top = ref<{ users: any[]; groups: any[]; tracks: any[] } | null>(null);
 const dist = ref<Record<string, any> | null>(null);
 
-const dayOptions = [
-  { label: "近 7 天", value: 7 },
-  { label: "近 14 天", value: 14 },
-  { label: "近 30 天", value: 30 },
-  { label: "近 90 天", value: 90 },
+const rangeOptions = [
+  { label: "今天（按小时）", value: "today" },
+  { label: "近一天（按小时）", value: "24h" },
+  { label: "近三天", value: "3d" },
+  { label: "近一周", value: "7d" },
+  { label: "近 14 天", value: "14d" },
+  { label: "近一月", value: "30d" },
+  { label: "近 90 天", value: "90d" },
+  { label: "近一年（按月）", value: "1y" },
 ];
 
-const PALETTE = ["#5b8ff9", "#5ad8a6", "#f6bd16", "#e8684a", "#9270ca", "#ff9d4d", "#269a99", "#ff99c5"];
+const PALETTE = ["#ff7eb9", "#7ec9ff", "#ffd166", "#a78bfa", "#5ad8a6", "#ff9d4d", "#269a99", "#ff99c5"];
 
 const SOURCE_NAMES: Record<string, string> = {
   kw: "酷我",
@@ -40,10 +44,10 @@ async function load() {
   loading.value = true;
   try {
     const [o, t, tp, d] = await Promise.all([
-      apiGet<any>("stats/overview", { days: days.value }),
-      apiGet<any>("stats/trend", { days: days.value }),
+      apiGet<any>("stats/overview", { range: range.value }),
+      apiGet<any>("stats/trend", { range: range.value }),
       apiGet<any>("stats/top", { limit: 10 }),
-      apiGet<any>("stats/dist", { days: days.value }),
+      apiGet<any>("stats/dist", { range: range.value }),
     ]);
     overview.value = o;
     trend.value = t;
@@ -57,7 +61,7 @@ async function load() {
 }
 
 onMounted(load);
-watch(days, load);
+watch(range, load);
 
 const trendOption = computed(() => {
   const t = trend.value;
@@ -69,8 +73,22 @@ const trendOption = computed(() => {
     xAxis: { type: "category", data: t.dates, boundaryGap: false },
     yAxis: { type: "value", minInterval: 1 },
     series: [
-      { name: "搜索", type: "line", smooth: true, data: t.search, itemStyle: { color: PALETTE[0] }, areaStyle: { opacity: 0.12 } },
-      { name: "点歌", type: "line", smooth: true, data: t.play, itemStyle: { color: PALETTE[1] }, areaStyle: { opacity: 0.12 } },
+      {
+        name: "搜索",
+        type: "line",
+        smooth: true,
+        data: t.search,
+        itemStyle: { color: PALETTE[0] },
+        areaStyle: { opacity: 0.18 },
+      },
+      {
+        name: "点歌",
+        type: "line",
+        smooth: true,
+        data: t.play,
+        itemStyle: { color: PALETTE[1] },
+        areaStyle: { opacity: 0.18 },
+      },
     ],
   };
 });
@@ -111,21 +129,16 @@ function barOption(rows: any[], nameKey: string, subKey: string | null) {
 
 <template>
   <n-spin :show="loading">
-    <div style="display: flex; justify-content: flex-end; margin-bottom: 12px">
-      <n-select v-model:value="days" :options="dayOptions" style="width: 140px" />
+    <div style="display: flex; justify-content: flex-end; gap: 10px; margin-bottom: 12px">
+      <n-select v-model:value="range" :options="rangeOptions" style="width: 190px" />
+      <n-button @click="load">🔄 刷新</n-button>
     </div>
 
     <n-grid :cols="24" :x-gap="12" :y-gap="12">
       <n-grid-item :span="6"><n-card size="small"><n-statistic label="累计搜索" :value="overview?.overall_search ?? 0" /></n-card></n-grid-item>
       <n-grid-item :span="6"><n-card size="small"><n-statistic label="累计点歌" :value="overview?.overall_play ?? 0" /></n-card></n-grid-item>
-      <n-grid-item :span="6"><n-card size="small"><n-statistic label="今日搜索 / 点歌">
-        <template #default>{{ overview?.today_search ?? 0 }} / {{ overview?.today_play ?? 0 }}</template>
-      </n-statistic></n-card></n-grid-item>
-      <n-grid-item :span="6"><n-card size="small"><n-statistic label="搜索成功率">
-        <template #default>
-          {{ overview && overview.search_total ? Math.round((overview.search_ok / overview.search_total) * 100) : 0 }}%
-        </template>
-      </n-statistic></n-card></n-grid-item>
+      <n-grid-item :span="6"><n-card size="small"><n-statistic :label="`本范围搜索`" :value="overview?.search_total ?? 0" /></n-card></n-grid-item>
+      <n-grid-item :span="6"><n-card size="small"><n-statistic :label="`本范围点歌`" :value="overview?.play_total ?? 0" /></n-card></n-grid-item>
 
       <n-grid-item :span="24">
         <n-card title="趋势" size="small">

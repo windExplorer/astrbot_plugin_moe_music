@@ -78,8 +78,8 @@ class TestStats:
         await seed(store)
         kind, value, status = await api.stats_overview()
         assert kind == "json" and status == 200
+        assert value["range"] == "7d"  # stub query 无参数 → 默认范围
         assert value["search_total"] == 1 and value["play_total"] == 1
-        assert value["today_play"] == 1
         assert value["quality_fallback"] == 1
         assert value["overall_play"] == 1
 
@@ -87,10 +87,29 @@ class TestStats:
         api, store, _ = make_api(tmp_path)
         await seed(store)
         _, value, _ = await api.stats_trend()
-        assert len(value["dates"]) == 14
-        assert len(value["search"]) == 14 and len(value["play"]) == 14
+        assert value["bucket"] == "day"
+        assert len(value["dates"]) == 7
+        assert len(value["search"]) == 7 and len(value["play"]) == 7
         assert value["play"][-1] == 1  # 今天有 1 次点歌
         assert sum(value["play"]) == 1
+
+    async def test_trend_hour_bucket(self, tmp_path: Path):
+        api, store, _ = make_api(tmp_path)
+        await seed(store)
+        stub = sys.modules["astrbot.api.web"].request
+
+        class HourQuery:
+            def get(self, name, default=None, type=None):
+                return "today" if name == "range" else default
+
+        original = stub.query
+        stub.query = HourQuery()
+        try:
+            _, value, _ = await api.stats_trend()
+            assert value["bucket"] == "hour"
+            assert len(value["dates"]) == 24
+        finally:
+            stub.query = original
 
     async def test_top_and_dist(self, tmp_path: Path):
         api, store, _ = make_api(tmp_path)
@@ -102,7 +121,8 @@ class TestStats:
 
         _, dist, _ = await api.stats_dist()
         assert dist["quality"][0]["k"] == "128k"
-        assert dist["send_mode"][0]["k"] == "text"
+        assert dist["send_mode"][0]["k"] == "文本链接"  # 枚举已转中文
+        assert dist["selection"][0]["k"] == "回复序号"
         assert dist["queue_waits"] == [15]
 
 

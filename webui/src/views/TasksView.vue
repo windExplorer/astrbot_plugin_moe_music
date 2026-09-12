@@ -32,14 +32,19 @@ function applySnapshot(s: any) {
 
 async function startLive() {
   stopLive();
-  const ok = await subscribeSSE("tasks/stream", (parsed) => applySnapshot(parsed));
-  if (ok) {
-    unsub = ok;
-  } else {
-    // bridge 不支持 SSE：降级轮询
-    pollTimer = setInterval(fetchOnce, 2000);
-    msg.warning("当前环境不支持实时流，已切换为 2 秒轮询");
+  try {
+    const ok = await subscribeSSE("tasks/stream", (parsed) => applySnapshot(parsed));
+    if (ok) {
+      unsub = ok;
+      pushMode.value = "sse";
+      return;
+    }
+    // bridge 不支持 SSE
+  } catch {
+    // SSE 建立失败（旧版 AstrBot 不支持 sse:subscribe 等）——降级轮询
   }
+  pollTimer = setInterval(fetchOnce, 2000);
+  pushMode.value = "poll";
 }
 
 function stopLive() {
@@ -63,10 +68,6 @@ function toggleLive(v: boolean) {
   else stopLive();
 }
 
-function ms(v: unknown): string {
-  return v === null || v === undefined ? "-" : `${v} ms`;
-}
-
 const SOURCE_NAMES: Record<string, string> = {
   kw: "酷我",
   kg: "酷狗",
@@ -76,6 +77,28 @@ const SOURCE_NAMES: Record<string, string> = {
   xm: "虾米",
   bd: "百度",
 };
+
+const SEND_MODE_NAMES: Record<string, string> = {
+  card: "音乐卡片",
+  record_link: "语音链接",
+  record_local: "本地语音",
+  file_link: "文件链接",
+  file_local: "本地文件",
+  text: "文本链接",
+};
+
+const SELECTION_NAMES: Record<string, string> = {
+  direct_index: "命令序号",
+  single: "单曲直发",
+  picked: "回复序号",
+  llm: "AI 点歌",
+};
+
+function sendModeName(row: any): string {
+  return SEND_MODE_NAMES[row.send_mode] ?? row.send_mode ?? "-";
+}
+
+const pushMode = ref<"sse" | "poll" | "off">("off");
 
 function sourceName(row: any): string {
   return SOURCE_NAMES[row.source] ?? row.source ?? "-";
@@ -105,7 +128,7 @@ const playColumns = [
   },
   { title: "平台", key: "source", width: 80, render: sourceName },
   { title: "音质", key: "quality", width: 80 },
-  { title: "方式", key: "send_mode", width: 110 },
+  { title: "方式", key: "send_mode", width: 110, render: sendModeName },
   {
     title: "来源",
     key: "trigger_type",
@@ -140,7 +163,10 @@ const searchColumns = [
           <n-tag :bordered="false">累计提交 {{ queue?.submitted ?? 0 }} / 拒绝 {{ queue?.rejected ?? 0 }}</n-tag>
         </div>
         <div style="display: flex; align-items: center; gap: 8px">
-          <span style="font-size: 13px; opacity: 0.7">实时推送</span>
+          <n-tag size="small" :bordered="false" :type="pushMode === 'sse' ? 'success' : pushMode === 'poll' ? 'warning' : 'default'">
+            {{ pushMode === "sse" ? "实时推送" : pushMode === "poll" ? "轮询 2s" : "未开启" }}
+          </n-tag>
+          <span style="font-size: 13px; opacity: 0.7">自动刷新</span>
           <n-switch :value="live" size="small" @update:value="toggleLive" />
           <n-button size="small" @click="fetchOnce">手动刷新</n-button>
         </div>
