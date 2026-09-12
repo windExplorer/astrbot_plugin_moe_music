@@ -67,6 +67,20 @@ function ms(v: unknown): string {
   return v === null || v === undefined ? "-" : `${v} ms`;
 }
 
+const SOURCE_NAMES: Record<string, string> = {
+  kw: "酷我",
+  kg: "酷狗",
+  tx: "QQ音乐",
+  wy: "网易云",
+  mg: "咪咕",
+  xm: "虾米",
+  bd: "百度",
+};
+
+function sourceName(row: any): string {
+  return SOURCE_NAMES[row.source] ?? row.source ?? "-";
+}
+
 function statusTag(row: any) {
   return row.success
     ? h(NTag, { size: "small", type: "success", bordered: false }, { default: () => "成功" })
@@ -89,7 +103,7 @@ const playColumns = [
     ellipsis: { tooltip: true },
     render: (row: any) => (row.singer ? `${row.track_name} - ${row.singer}` : row.track_name),
   },
-  { title: "音源", key: "source", width: 70 },
+  { title: "平台", key: "source", width: 80, render: sourceName },
   { title: "音质", key: "quality", width: 80 },
   { title: "方式", key: "send_mode", width: 110 },
   {

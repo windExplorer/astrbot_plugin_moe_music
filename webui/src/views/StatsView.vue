@@ -22,6 +22,20 @@ const dayOptions = [
 
 const PALETTE = ["#5b8ff9", "#5ad8a6", "#f6bd16", "#e8684a", "#9270ca", "#ff9d4d", "#269a99", "#ff99c5"];
 
+const SOURCE_NAMES: Record<string, string> = {
+  kw: "酷我",
+  kg: "酷狗",
+  tx: "QQ音乐",
+  wy: "网易云",
+  mg: "咪咕",
+  xm: "虾米",
+  bd: "百度",
+};
+
+function labelOf(k: string): string {
+  return SOURCE_NAMES[k] ?? k;
+}
+
 async function load() {
   loading.value = true;
   try {
@@ -61,7 +75,7 @@ const trendOption = computed(() => {
   };
 });
 
-function pieOption(rows: any[]) {
+function pieOption(rows: any[], translate = false) {
   return {
     tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
     legend: { bottom: 0, type: "scroll" },
@@ -70,7 +84,7 @@ function pieOption(rows: any[]) {
         type: "pie",
         radius: ["38%", "66%"],
         center: ["50%", "44%"],
-        data: (rows || []).map((r) => ({ name: r.k, value: r.n })),
+        data: (rows || []).map((r) => ({ name: translate ? labelOf(r.k) : r.k, value: r.n })),
         color: PALETTE,
         label: { formatter: "{b}\n{d}%" },
       },
@@ -137,7 +151,7 @@ function barOption(rows: any[], nameKey: string, subKey: string | null) {
         <n-card title="选歌方式" size="small"><Chart :option="pieOption(dist?.selection)" /></n-card>
       </n-grid-item>
       <n-grid-item :span="12">
-        <n-card title="音源分布" size="small"><Chart :option="pieOption(dist?.source)" /></n-card>
+        <n-card title="平台分布" size="small"><Chart :option="pieOption(dist?.source, true)" /></n-card>
       </n-grid-item>
 
       <n-grid-item :span="24">
