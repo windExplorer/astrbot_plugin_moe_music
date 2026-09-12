@@ -58,7 +58,10 @@ function optionsPlain(item: any): { label: string; value: string }[] {
 async function save() {
   saving.value = true;
   try {
-    const res = await apiPost<any>("config", values.value);
+    // 关键：转纯 JSON 对象再交给 bridge —— Vue 的 reactive 代理对象无法被
+    // postMessage 结构化克隆（报 "could not be cloned"）
+    const payload = JSON.parse(JSON.stringify(values.value));
+    const res = await apiPost<any>("config", payload);
     msg.success(`已保存并生效：${(res.applied ?? []).length} 项（队列并发等结构性配置重启后生效）`);
   } catch (e: any) {
     msg.error(`保存失败：${e.message ?? e}`);
@@ -108,15 +111,25 @@ async function save() {
                     v-else-if="schema[key].type === 'bool'"
                     v-model:value="values[key]"
                   />
-                  <div v-else-if="schema[key].type === 'int'" style="width: 100%">
-                    <n-slider
-                      v-if="schema[key].slider"
-                      v-model:value="values[key]"
-                      :min="schema[key].slider.min"
-                      :max="schema[key].slider.max"
-                      :step="schema[key].slider.step"
-                      marks
-                    />
+                  <div v-else-if="schema[key].type === 'int'" style="display: flex; align-items: center; gap: 12px; width: 100%">
+                    <template v-if="schema[key].slider">
+                      <n-slider
+                        style="flex: 1"
+                        :value="values[key] ?? schema[key].default"
+                        :min="schema[key].slider.min"
+                        :max="schema[key].slider.max"
+                        :step="schema[key].slider.step"
+                        @update:value="(v: number) => (values[key] = v)"
+                      />
+                      <n-input-number
+                        :value="values[key] ?? schema[key].default"
+                        style="width: 110px"
+                        :min="schema[key].slider.min"
+                        :max="schema[key].slider.max"
+                        :step="schema[key].slider.step"
+                        @update:value="(v: number | null) => (values[key] = v ?? schema[key].default)"
+                      />
+                    </template>
                     <n-input-number v-else v-model:value="values[key]" style="width: 200px" />
                   </div>
                   <n-input v-else v-model:value="values[key]" />

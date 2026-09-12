@@ -2,6 +2,13 @@
 
 本文件记录 astrbot_plugin_moe_music 的版本变更，最新版本在最上方。
 
+## v0.7.5 - 2026-09-12
+
+### 修复
+
+- WebUI 配置页保存报「postMessage ... could not be cloned」：Vue reactive 代理对象无法被 bridge 的结构化克隆传输，保存前先转为纯 JSON 对象。
+- 配置页滑块（数值类配置）右侧现在实时显示当前数值（滑块与数字输入框联动），并移除无效的 marks 属性。
+
 ## v0.7.4 - 2026-09-12
 
 ### 改进
