@@ -4,6 +4,7 @@ import { onMounted, ref } from "vue";
 import {
   NButton,
   NCard,
+  NEl,
   NForm,
   NFormItem,
   NInput,
@@ -65,7 +66,19 @@ function toLines(value: any): string {
   return "";
 }
 
-function setLines(key: string, text: string) {
+// 名单文本域的「原始输入」：编辑过程中必须原样保留（含空格 / 换行 / 逗号）。
+// 若把解析后的数组 join 回去当受控值渲染，用户敲下的分隔符会被立刻吃掉——
+// 表现为「怎么都无法输入空格和换行」，连第二个号码都填不进去。
+const listText = ref<Record<string, string>>({});
+
+/** 文本域当前内容：优先用正在编辑的原文，否则由配置值渲染。 */
+function textOf(key: string, value: any): string {
+  return key in listText.value ? listText.value[key] : toLines(value);
+}
+
+/** 文本域输入：保留原文，同时同步解析结果（供保存与「当前 N 项」统计）。 */
+function onListInput(key: string, text: string) {
+  listText.value[key] = text;
   values.value[key] = splitList(text);
 }
 
@@ -77,6 +90,7 @@ async function load() {
     const [s, c] = await Promise.all([apiGet<any>("schema"), apiGet<any>("config")]);
     schema.value = s;
     values.value = { ...c };
+    listText.value = {}; // 丢弃编辑缓存，按最新配置重新渲染
   } catch (e: any) {
     msg.error(`加载配置失败：${e.message ?? e}`);
   } finally {
@@ -111,7 +125,8 @@ async function save() {
 
 <template>
   <n-spin :show="loading">
-    <n-card size="small">
+    <!-- margin-bottom 给右下角固定操作条让位，避免遮住最后一个表单控件 -->
+    <n-card size="small" style="margin-bottom: 64px">
       <template #header>
         <div style="display: flex; align-items: center; gap: 12px">
           <span>插件配置</span>
@@ -140,9 +155,9 @@ async function save() {
                     v-else-if="isLineList(schema[key])"
                     type="textarea"
                     :rows="4"
-                    :value="toLines(values[key])"
+                    :value="textOf(key, values[key])"
                     placeholder="一行一个（也支持逗号或空格分隔），支持 * 通配；留空表示不启用"
-                    @update:value="(v: string) => setLines(key, v)"
+                    @update:value="(v: string) => onListInput(key, v)"
                   />
                   <n-select
                     v-else-if="schema[key].type === 'string' && schema[key].options"
@@ -192,5 +207,30 @@ async function save() {
         </n-card>
       </n-form>
     </n-card>
+
+    <!-- 配置页很长：把「保存」固定到右下角，改完即点，无需滚回顶部 -->
+    <n-el tag="div" class="settings-actions">
+      <n-button size="small" @click="load">重载</n-button>
+      <n-button size="small" type="primary" :loading="saving" @click="save">保存并生效</n-button>
+    </n-el>
   </n-spin>
 </template>
+
+<style scoped>
+/* 固定操作条：滚动容器是控制台的 .content（不是 window），用 fixed 才能稳定贴住视口；
+   sticky 会被卡片自身的 overflow 裁掉。n-el 用于取得 naive-ui 主题变量，自动适配暗色主题。 */
+.settings-actions {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--n-color, rgba(255, 255, 255, 0.92));
+  border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.25));
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+</style>
