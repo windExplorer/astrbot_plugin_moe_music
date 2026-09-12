@@ -35,6 +35,12 @@ class _UserSessionFilter(SessionFilter):
         return f"{event.unified_msg_origin}:{event.get_sender_id()}"
 
 
+def _is_song_command_text(text: str) -> bool:
+    """判断一条消息是否是新的点歌命令（用于等待选号时的重复点歌提示）。"""
+    cmd = text.strip().partition(" ")[0].strip().lower()
+    return cmd in COMMAND_SOURCE_ALIAS
+
+
 class MoeMusicService:
     """点歌业务服务。"""
 
@@ -120,30 +126,42 @@ class MoeMusicService:
         trigger_type: str,
         queue_wait_ms: int = 0,
     ) -> list[Track] | None:
-        """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 None。"""
-        started = time.monotonic()
-        try:
-            tracks = await self.api.search(
-                keyword=keyword, limit=limit, source=source or None, quality=self.cfg.default_quality
-            )
-        except ApiError as e:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            logger.error(f"[萌音点歌] 搜索失败：code={e.code} {e.message}（关键词：{keyword}）")
-            if self.store:
-                await self.store.add_search_record(
-                    trigger_type=trigger_type,
-                    keyword=keyword,
-                    source=source or "",
-                    result_count=0,
-                    success=0,
-                    error_code=e.code,
-                    duration_ms=duration_ms,
-                    queue_wait_ms=queue_wait_ms,
-                    **ctx,
-                )
-            await event.send(event.plain_result(e.user_hint))
-            return None
+        """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 None。
 
+        后端音源被连续请求短暂冷却时会返回空结果（实测存在），因此空结果
+        间隔 3 秒自动重试一次，仍为空才判定无结果。
+        """
+        started = time.monotonic()
+        tracks = None
+        for attempt in (1, 2):
+            try:
+                tracks = await self.api.search(
+                    keyword=keyword, limit=limit, source=source or None, quality=self.cfg.default_quality
+                )
+            except ApiError as e:
+                duration_ms = int((time.monotonic() - started) * 1000)
+                logger.error(f"[萌音点歌] 搜索失败：code={e.code} {e.message}（关键词：{keyword}）")
+                if self.store:
+                    await self.store.add_search_record(
+                        trigger_type=trigger_type,
+                        keyword=keyword,
+                        source=source or "",
+                        result_count=0,
+                        success=0,
+                        error_code=e.code,
+                        duration_ms=duration_ms,
+                        queue_wait_ms=queue_wait_ms,
+                        **ctx,
+                    )
+                await event.send(event.plain_result(e.user_hint))
+                return None
+            if tracks or attempt == 2:
+                break
+            # 空结果：可能命中后端音源冷却窗口，间隔后重试一次
+            logger.info(f"[萌音点歌] 搜索「{keyword}」结果为空，3 秒后重试一次（可能为音源瞬时冷却）")
+            await asyncio.sleep(3)
+
+        duration_ms = int((time.monotonic() - started) * 1000)
         if self.store:
             await self.store.add_search_record(
                 trigger_type=trigger_type,
@@ -151,7 +169,7 @@ class MoeMusicService:
                 source=source or "",
                 result_count=len(tracks),
                 success=1,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                duration_ms=duration_ms,
                 queue_wait_ms=queue_wait_ms,
                 **ctx,
             )
@@ -277,6 +295,12 @@ class MoeMusicService:
                 controller.stop()
                 ev.stop_event()
                 await ev.send(ev.plain_result("好的，已取消点歌～"))
+                return
+            if _is_song_command_text(text):
+                # 等待选号期间又发起点歌：明确提示，不进任务队列，继续等待
+                await ev.send(
+                    ev.plain_result("您还有一单点歌在进行中，请回复序号选择，或回复「取消」后再点新的哦～")
+                )
                 return
             if not text.isdigit():
                 # 非序号消息不响应，继续等待（不打断会话）

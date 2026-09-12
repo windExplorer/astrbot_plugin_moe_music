@@ -87,14 +87,14 @@
     },
     "queue_concurrency": {
         "description": "点歌并发数",
-        "hint": "多个用户同时点歌时，同时处理的任务数（搜索/发送各环节串过任务队列），超出部分排队等待",
+        "hint": "多个用户同时点歌时的排队处理方式：1 为严格串行（上一个任务完成再执行下一个，默认，最稳）；调大可并行处理但会加重后端压力",
         "type": "int",
         "slider": {
             "min": 1,
             "max": 5,
             "step": 1
         },
-        "default": 2
+        "default": 1
     },
     "queue_max_pending": {
         "description": "排队上限",

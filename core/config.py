@@ -63,7 +63,7 @@ class PluginConfig:
     send_modes: list[str] = field(default_factory=lambda: ["card", "record_link", "file_local", "text"])
     timeout: int = 15
     request_timeout: int = 10
-    queue_concurrency: int = 2  # 点歌任务并发度（worker 数）
+    queue_concurrency: int = 1  # 点歌任务并发度（默认串行：上一个任务完成再执行下一个）
     queue_max_pending: int = 20  # 等待队列上限，队满直接拒绝
     enable_lyrics: bool = False
     embed_metadata: bool = True  # 文件模式嵌入封面/歌词/标题等元数据
@@ -133,7 +133,7 @@ class PluginConfig:
             send_modes=send_modes,
             timeout=_int_opt("timeout", 15, 5, 60),
             request_timeout=_int_opt("request_timeout", 10, 5, 30),
-            queue_concurrency=_int_opt("queue_concurrency", 2, 1, 5),
+            queue_concurrency=_int_opt("queue_concurrency", 1, 1, 5),
             queue_max_pending=_int_opt("queue_max_pending", 20, 5, 50),
             enable_lyrics=bool(config.get("enable_lyrics", False)),
             embed_metadata=bool(config.get("embed_metadata", True)),

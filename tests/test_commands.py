@@ -8,6 +8,7 @@ from astrbot_plugin_moe_music.core.api_client import MusicApiClient
 from astrbot_plugin_moe_music.core.commands import MoeMusicService
 from astrbot_plugin_moe_music.core.config import PluginConfig
 from astrbot_plugin_moe_music.core.lyrics_render import LyricsRenderer
+from astrbot_plugin_moe_music.core.model import Track
 from astrbot_plugin_moe_music.core.sender import SongSender
 
 
@@ -537,3 +538,56 @@ class TestLyricsAttachment:
             await service.handle_song_request(event, "晴天", index_hint=1)
             kinds = [item[0] for item in event.sent]
             assert kinds == ["chain"]  # 只发歌，无歌词
+
+
+class TestEmptyRetry:
+    """搜索空结果自动重试（后端音源瞬时冷却缓解）。"""
+
+    async def test_retry_on_empty_then_success(self):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api)
+            calls = {"n": 0}
+
+            async def flaky(keyword, limit, source=None, quality=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return []  # 第一次空（音源冷却）
+                return [Track.from_api(track_json(1))]
+
+            service.api.search = flaky
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
+            assert calls["n"] == 2  # 重试过一次
+            assert any("chain" in item[0] for item in event.sent)  # 最终发送成功
+
+    async def test_no_infinite_retry(self):
+        async with FakeBackend(search_result=[]) as api:
+            service = make_service(api)
+            calls = {"n": 0}
+
+            async def always_empty(keyword, limit, source=None, quality=None):
+                calls["n"] += 1
+                return []
+
+            service.api.search = always_empty
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天")
+            assert calls["n"] == 2  # 最多两次（首次 + 重试）
+            assert event.sent[-1] == ("plain", "没有找到相关歌曲，换个关键词试试吧～")
+
+
+def store_row(service):
+    return service.store._conn.execute("SELECT result_count FROM search_records").fetchall()[-1]
+
+
+class TestPickerRejection:
+    """等待选号期间再次点歌：提示进行中，不进任务队列。"""
+
+    async def test_new_song_command_during_wait_gets_hint(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = make_service(api)
+            event = MockEvent(message_str="点歌 别的歌")  # 等待中又发起点歌
+            await service.handle_song_request(event, "晴天")
+            # stub 的 session_waiter 会立即消费一条消息：应收到「进行中」提示
+            hints = [item[1] for item in event.sent if item[0] == "plain" and "进行中" in item[1]]
+            assert hints, "应提示还有一单点歌进行中"
