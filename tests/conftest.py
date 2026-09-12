@@ -166,6 +166,24 @@ def _install_astrbot_stubs():
     path_mod = types.ModuleType("astrbot.core.utils.astrbot_path")
     path_mod.get_astrbot_temp_path = lambda: str(Path(__file__).parent / "_tmp")
 
+    # ---- astrbot.api.web（插件 Pages 后端 API） ----
+    class _Query:
+        def get(self, name, default=None, type=None):
+            return default
+
+        def getlist(self, name):
+            return []
+
+    web_mod = types.ModuleType("astrbot.api.web")
+    web_mod.request = types.SimpleNamespace(
+        query=_Query(), username="tester", method="GET", path="/test", plugin_name="astrbot_plugin_moe_music"
+    )
+    web_mod.json_response = lambda value, status_code=200: ("json", value, status_code)
+    web_mod.error_response = lambda msg, status_code=400: ("error", msg, status_code)
+    web_mod.stream_response = lambda gen: ("stream", gen)
+    web_mod.file_response = lambda *a, **kw: ("file",)
+    web_mod.PluginUploadFile = type("PluginUploadFile", (), {})
+
     # ---- 组装包结构 ----
     for name, mod in {
         "astrbot": astrbot,
@@ -173,6 +191,7 @@ def _install_astrbot_stubs():
         "astrbot.api.event": event_mod,
         "astrbot.api.star": star_mod,
         "astrbot.api.message_components": comp_mod,
+        "astrbot.api.web": web_mod,
         "astrbot.core": types.ModuleType("astrbot.core"),
         "astrbot.core.config": types.ModuleType("astrbot.core.config"),
         "astrbot.core.config.astrbot_config": cfg_mod,

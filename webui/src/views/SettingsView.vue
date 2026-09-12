@@ -1,0 +1,134 @@
+<script setup lang="ts">
+/** 配置页：读后端 schema 结构化渲染表单，保存回插件配置（热应用）。 */
+import { onMounted, ref } from "vue";
+import {
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NInput,
+  NInputNumber,
+  NSelect,
+  NSlider,
+  NSpin,
+  NSwitch,
+  useMessage,
+} from "naive-ui";
+import { apiGet, apiPost } from "../bridge";
+
+const msg = useMessage();
+const loading = ref(false);
+const saving = ref(false);
+const schema = ref<Record<string, any>>({});
+const values = ref<Record<string, any>>({});
+
+// 表单分组顺序与标题
+const GROUPS: Array<{ title: string; keys: string[] }> = [
+  { title: "音乐服务", keys: ["api_base_url", "api_key", "public_base_url", "proxy", "request_timeout"] },
+  { title: "点歌行为", keys: ["default_source", "default_quality", "song_limit", "selection_display", "send_modes", "timeout", "enable_lyrics", "embed_metadata"] },
+  { title: "队列", keys: ["queue_concurrency", "queue_max_pending"] },
+  { title: "访问控制（白/黑名单，白名单优先）", keys: ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"] },
+  { title: "其他", keys: ["enable_self_test"] },
+];
+
+onMounted(load);
+
+async function load() {
+  loading.value = true;
+  try {
+    const [s, c] = await Promise.all([apiGet<any>("schema"), apiGet<any>("config")]);
+    schema.value = s;
+    values.value = { ...c };
+  } catch (e: any) {
+    msg.error(`加载配置失败：${e.message ?? e}`);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function optValues(item: any): { label: string; value: string }[] {
+  return (item.options || []).map((o: string) => ({ label: o, value: o }));
+}
+
+function optionsPlain(item: any): { label: string; value: string }[] {
+  // list 无选项 → 动态标签输入（白名单等），此处用于带 options 的 list（send_modes）
+  return optValues(item);
+}
+
+async function save() {
+  saving.value = true;
+  try {
+    const res = await apiPost<any>("config", values.value);
+    msg.success(`已保存并生效：${(res.applied ?? []).length} 项（队列并发等结构性配置重启后生效）`);
+  } catch (e: any) {
+    msg.error(`保存失败：${e.message ?? e}`);
+  } finally {
+    saving.value = false;
+  }
+}
+</script>
+
+<template>
+  <n-spin :show="loading">
+    <n-card size="small">
+      <template #header>
+        <div style="display: flex; align-items: center; gap: 12px">
+          <span>插件配置</span>
+          <n-button size="small" @click="load">重载</n-button>
+          <n-button size="small" type="primary" :loading="saving" @click="save">保存并生效</n-button>
+        </div>
+      </template>
+      <n-form label-placement="top" style="max-width: 860px">
+        <n-card v-for="g in GROUPS" :key="g.title" :title="g.title" size="small" style="margin-bottom: 12px">
+          <n-grid :cols="24" :x-gap="16" :y-gap="4">
+            <template v-for="key in g.keys" :key="key">
+              <n-grid-item v-if="schema[key]" :span="24">
+                <n-form-item :label="schema[key].description">
+                  <template v-if="(schema[key].type === 'string' || schema[key].type === 'text') && !schema[key].options">
+                    <n-input
+                      v-if="key === 'send_modes' || key.startsWith('whitelist') || key.startsWith('blacklist')"
+                      :value="(values[key] || []).join(',')"
+                      placeholder="逗号分隔"
+                      @update:value="(v: string) => (values[key] = v.split(',').map((s: string) => s.trim()).filter(Boolean))"
+                    />
+                    <n-input v-else v-model:value="values[key]" :placeholder="schema[key].hint || ''" />
+                  </template>
+                  <n-select
+                    v-else-if="schema[key].type === 'string' && schema[key].options"
+                    v-model:value="values[key]"
+                    :options="optValues(schema[key])"
+                  />
+                  <n-select
+                    v-else-if="schema[key].type === 'list' && schema[key].options"
+                    v-model:value="values[key]"
+                    multiple
+                    :options="optionsPlain(schema[key])"
+                  />
+                  <n-switch
+                    v-else-if="schema[key].type === 'bool'"
+                    v-model:value="values[key]"
+                  />
+                  <div v-else-if="schema[key].type === 'int'" style="width: 100%">
+                    <n-slider
+                      v-if="schema[key].slider"
+                      v-model:value="values[key]"
+                      :min="schema[key].slider.min"
+                      :max="schema[key].slider.max"
+                      :step="schema[key].slider.step"
+                      marks
+                    />
+                    <n-input-number v-else v-model:value="values[key]" style="width: 200px" />
+                  </div>
+                  <n-input v-else v-model:value="values[key]" />
+                </n-form-item>
+                <div v-if="schema[key].hint" style="margin: -12px 0 8px; font-size: 12px; opacity: 0.55; line-height: 1.5">
+                  {{ schema[key].hint }}
+                </div>
+              </n-grid-item>
+            </template>
+          </n-grid>
+        </n-card>
+      </n-form>
+    </n-card>
+  </n-spin>
+</template>

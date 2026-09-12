@@ -84,6 +84,16 @@ QQ点歌 晴天 2
 
 依赖（安装时由 AstrBot 自动安装，见 `requirements.txt`）：`aiohttp`、`aiofiles`、`Pillow`、`mutagen`。
 
+## WebUI 控制台
+
+安装后从 AstrBot 后台「插件管理 → 萌音点歌 → 萌音控制台」打开（Vue3 + Naive UI + ECharts）：
+
+- **统计**：搜索 / 点歌总量与趋势、成功率、用户 / 群 / 歌曲排行、音质与发送方式分布、排队与全流程耗时、音质降级率；
+- **实时任务**：点歌任务队列状态与最近搜索 / 点歌记录（SSE 实时推送）；
+- **配置**：全部插件配置的结构化编辑，保存即生效。
+
+前端源码位于 `webui/`，修改后执行 `cd webui && npm run build` 重新构建到 `pages/moe-console/`。
+
 ## 开发
 
 - 打包：`python scripts/pack.py`，产物输出至 `dist/astrbot_plugin_moe_music_v<version>.zip`（跨平台，标准库实现）；

@@ -245,6 +245,23 @@ class RecordStore:
 
         return await asyncio.to_thread(_q)
 
+    async def query(self, sql: str, params: tuple = ()) -> list[dict]:
+        """只读查询（WebUI 统计用），返回 dict 行列表。失败返回空列表。"""
+
+        def _q():
+            self._conn.row_factory = sqlite3.Row
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                self._conn.row_factory = None
+
+        try:
+            return await asyncio.to_thread(_q)
+        except Exception:
+            logger.error(f"[萌音点歌] 统计查询失败：\n{traceback.format_exc()}")
+            return []
+
     async def close(self) -> None:
         try:
             await asyncio.to_thread(self._conn.close)

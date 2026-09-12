@@ -27,6 +27,7 @@ EXCLUDED_DIRS = {
     "scripts",
     "tests",
     "node_modules",
+    "webui",  # 前端源码（运行时只需构建产物 pages/moe-console/）
 }
 EXCLUDED_FILES = {"pyproject.toml", "uv.lock", ".python-version"}
 EXCLUDED_FILE_PATTERNS = (re.compile(r".*\.pyc$"), re.compile(r"^\.env"), re.compile(r"^\.gitignore$"))

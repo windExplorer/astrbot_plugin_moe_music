@@ -24,6 +24,7 @@ class SongTaskQueue:
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, max_pending))
         self._workers: list[asyncio.Task] = []
         self._running = False
+        self.active = 0  # 正在执行的任务数（含排队结束进入执行的）
         # 统计（自检展示用）
         self.submitted = 0
         self.rejected = 0
@@ -31,6 +32,18 @@ class SongTaskQueue:
     @property
     def pending(self) -> int:
         return self._queue.qsize()
+
+    def snapshot(self) -> dict:
+        """队列当前状态快照（WebUI / 自检展示用）。"""
+        return {
+            "running": self._running,
+            "concurrency": self._concurrency,
+            "max_pending": self._queue.maxsize,
+            "pending": self.pending,
+            "active": self.active,
+            "submitted": self.submitted,
+            "rejected": self.rejected,
+        }
 
     async def start(self) -> None:
         if self._running:
@@ -76,7 +89,11 @@ class SongTaskQueue:
                 if fut.done():  # 提交方已取消（理论上不会发生，防御）
                     continue
                 queue_wait_ms = int((time.monotonic() - enqueued_at) * 1000)
-                result = await fn(*args, queue_wait_ms=queue_wait_ms, **kwargs)
+                self.active += 1
+                try:
+                    result = await fn(*args, queue_wait_ms=queue_wait_ms, **kwargs)
+                finally:
+                    self.active -= 1
                 if not fut.done():
                     fut.set_result(result)
             except asyncio.CancelledError:

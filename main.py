@@ -118,7 +118,42 @@ class MoeMusicPlugin(Star):
             f"队列并发 {self.cfg.queue_concurrency}"
         )
         await self.queue.start()
+        try:
+            from .webui_api import register_web_api
+
+            register_web_api(self)
+        except Exception:
+            logger.warning("[萌音点歌] WebUI 路由注册失败（AstrBot 版本可能不支持插件 Pages），控制台不可用")
         asyncio.create_task(self._startup_probe())
+
+    async def apply_webui_config(self, clean: dict) -> None:
+        """WebUI 配置页保存：写回 AstrBotConfig 并热更新运行时组件。"""
+        self.config.update(clean)
+        await self.config.save_config_async()
+
+        old_api = self.api
+        self.cfg = PluginConfig.from_astrbot_config(self.config)
+        new_api = MusicApiClient(
+            base_url=self.cfg.api_base_url,
+            api_key=self.cfg.api_key,
+            request_timeout=self.cfg.request_timeout,
+            proxy=self.cfg.proxy,
+            public_base_url=self.cfg.public_base_url,
+        )
+        # 迁移 Key 限额缓存，避免刚保存完就重新自检
+        new_api.key_max_quality = old_api.key_max_quality
+        new_api.key_default_quality = old_api.key_default_quality
+        new_api.key_qps_limit = old_api.key_qps_limit
+        self.api = new_api
+        await old_api.close()
+
+        self.sender.cfg = self.cfg
+        self.sender.api = new_api
+        self.service.cfg = self.cfg
+        self.service.api = new_api
+        self.access = AccessController(self.cfg)
+        self.service.access = self.access
+        logger.info(f"[萌音点歌] 已通过 WebUI 更新配置：{sorted(clean)}（队列并发数等结构性配置重启后生效）")
 
     async def _startup_probe(self):
         """启动自检：成功则更新 Key 限额缓存；失败仅记日志。"""
