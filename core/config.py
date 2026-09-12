@@ -43,6 +43,21 @@ LLM_SOURCE_ALIAS: dict[str, str] = {
     "mg": "mg",
 }
 
+# 「点歌文件」指令的后缀：命令去掉它之后与普通点歌别名完全同构
+FILE_COMMAND_SUFFIX = "文件"
+
+
+def resolve_command_source(cmd: str, *, file_mode: bool = False) -> str:
+    """命令名 → 平台码（找不到则空字符串 = 聚合搜索）。
+
+    ``file_mode=True``（「点歌文件」指令）时先剥掉尾部「文件」后缀再查表，因此
+    「酷狗点歌文件」「qq点歌文件」等大小写变体无需维护第二张映射表。
+    """
+    base = cmd.strip()
+    if file_mode and base.endswith(FILE_COMMAND_SUFFIX):
+        base = base[: -len(FILE_COMMAND_SUFFIX)]
+    return COMMAND_SOURCE_ALIAS.get(base.lower(), "")
+
 
 def _strip_option_label(option: str) -> str:
     """归一化配置面板选项：去掉括号说明，如 "all(聚合)" -> "all"、"card(音乐卡片)" -> "card"。"""
@@ -67,6 +82,9 @@ class PluginConfig:
     queue_max_pending: int = 20  # 等待队列上限，队满直接拒绝
     enable_lyrics: bool = False
     embed_metadata: bool = True  # 文件模式嵌入封面/歌词/标题等元数据
+    # 「点歌文件」指令：独立音质与嵌入开关（与普通点歌的 default_quality / embed_metadata 分开）
+    file_quality: str = "flac"
+    file_embed_metadata: bool = True
     recall_candidate: bool = True  # 选歌结束后撤回候选列表（仅 aiocqhttp 可用）
     proxy: str = ""
     enable_self_test: bool = True
@@ -89,6 +107,7 @@ class PluginConfig:
             default_source = "all"
 
         default_quality = _strip_option_label(str(config.get("default_quality", "320k") or "320k"))
+        file_quality = _strip_option_label(str(config.get("file_quality", "flac") or "flac"))
 
         try:
             song_limit = int(config.get("song_limit", 5))
@@ -138,6 +157,8 @@ class PluginConfig:
             queue_max_pending=_int_opt("queue_max_pending", 20, 5, 50),
             enable_lyrics=bool(config.get("enable_lyrics", False)),
             embed_metadata=bool(config.get("embed_metadata", True)),
+            file_quality=file_quality,
+            file_embed_metadata=bool(config.get("file_embed_metadata", True)),
             recall_candidate=bool(config.get("recall_candidate", True)),
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),

@@ -19,7 +19,7 @@ import aiofiles
 import aiohttp
 from astrbot.api import logger
 
-from .model import Track
+from .model import Track, quality_rank
 
 # 业务错误码 -> 用户侧温馨提示（不含任何技术细节）
 USER_HINTS: dict[int, str] = {
@@ -261,6 +261,17 @@ class MusicApiClient:
             f"maxQuality={self.key_max_quality} status={key_info.get('status')}"
         )
         return data
+
+    def clamp_quality(self, wanted: str) -> str:
+        """把期望音质收敛到本 Key 允许的上限内。
+
+        后端对「显式传了超出 Key 上限的音质」是直接 422 拒绝（不是静默降级），
+        所以任何要显式带 quality 的请求都应先过这里，否则会莫名其妙失败。
+        """
+        key_max = self.key_max_quality
+        if key_max and 0 <= quality_rank(key_max) < quality_rank(wanted):
+            return key_max
+        return wanted
 
     async def search(
         self,

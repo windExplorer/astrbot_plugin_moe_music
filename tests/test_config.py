@@ -1,7 +1,11 @@
 """配置解析测试。"""
 
-from astrbot_plugin_moe_music.core.config import COMMAND_SOURCE_ALIAS, PluginConfig
-from astrbot_plugin_moe_music.main import SONG_COMMAND_ALIASES
+from astrbot_plugin_moe_music.core.config import (
+    COMMAND_SOURCE_ALIAS,
+    PluginConfig,
+    resolve_command_source,
+)
+from astrbot_plugin_moe_music.main import FILE_COMMAND_ALIASES, SONG_COMMAND_ALIASES
 
 
 class TestPluginConfig:
@@ -56,6 +60,24 @@ class TestPluginConfig:
         )
         assert PluginConfig.from_astrbot_config({"selection_display": "card"}).selection_display == "text"
 
+    def test_file_download_defaults(self):
+        """「点歌文件」指令的独立配置：默认 flac + 嵌入元数据。"""
+        cfg = PluginConfig.from_astrbot_config({})
+        assert cfg.file_quality == "flac"
+        assert cfg.file_embed_metadata is True
+
+        cfg2 = PluginConfig.from_astrbot_config(
+            {"file_quality": "master(母带)", "file_embed_metadata": False}
+        )
+        assert cfg2.file_quality == "master"  # 面板选项后缀已剥离
+        assert cfg2.file_embed_metadata is False
+
+    def test_file_quality_independent_from_default_quality(self):
+        """两者互不影响：改文件音质不会动普通点歌音质，反之亦然。"""
+        cfg = PluginConfig.from_astrbot_config({"default_quality": "128k", "file_quality": "flac"})
+        assert cfg.default_quality == "128k"
+        assert cfg.file_quality == "flac"
+
     def test_key_masked(self):
         cfg = PluginConfig.from_astrbot_config({"api_key": "sk-abcdef1234567890"})
         masked = cfg.key_masked
@@ -77,3 +99,63 @@ class TestCommandAlias:
     def test_song_command_aliases_cover_case_variants(self):
         # CommandFilter 大小写敏感，QQ 点歌的四种大小写组合都必须注册
         assert {"QQ点歌", "qq点歌", "Qq点歌", "qQ点歌"} <= SONG_COMMAND_ALIASES
+
+
+class TestResolveCommandSource:
+    """命令名 → 平台码：文件指令只需剥掉「文件」后缀，与点歌共用同一张映射表。"""
+
+    def test_plain_commands(self):
+        assert resolve_command_source("点歌") == ""
+        assert resolve_command_source("酷狗点歌") == "kg"
+        assert resolve_command_source("网易") == "wy"
+
+    def test_file_commands_resolve_like_song_commands(self):
+        for cmd, expect in [
+            ("点歌文件", ""),
+            ("网易点歌文件", "wy"),
+            ("网易文件", "wy"),
+            ("酷狗点歌文件", "kg"),
+            ("酷我点歌文件", "kw"),
+            ("咪咕点歌文件", "mg"),
+            ("腾讯点歌文件", "tx"),
+            ("QQ点歌文件", "tx"),
+            ("qq点歌文件", "tx"),
+            ("Qq点歌文件", "tx"),
+        ]:
+            assert resolve_command_source(cmd, file_mode=True) == expect, cmd
+
+    def test_file_suffix_only_stripped_in_file_mode(self):
+        # 普通点歌模式下不认识带「文件」后缀的命令，避免误判为平台别名
+        assert resolve_command_source("酷狗点歌文件") == ""
+
+
+class TestFileCommandAliases:
+    """「点歌文件」指令别名与点歌别名同构（点歌名 + 文件后缀）。"""
+
+    def test_aliases_are_song_aliases_plus_suffix(self):
+        assert FILE_COMMAND_ALIASES == {f"{name}文件" for name in SONG_COMMAND_ALIASES}
+
+    def test_platform_variants_present(self):
+        # 「点歌文件」是主命令名本身，不在 alias 集合里（与「点歌」同理）
+        assert {
+            "网易点歌文件",
+            "QQ点歌文件",
+            "qq点歌文件",
+            "酷狗点歌文件",
+            "酷我点歌文件",
+            "咪咕点歌文件",
+            "腾讯点歌文件",
+        } <= FILE_COMMAND_ALIASES
+
+    def test_every_alias_resolves_to_expected_source(self):
+        expect = {
+            "点歌文件": "",
+            "网易点歌文件": "wy",
+            "QQ点歌文件": "tx",
+            "酷狗点歌文件": "kg",
+            "酷我点歌文件": "kw",
+            "咪咕点歌文件": "mg",
+            "腾讯点歌文件": "tx",
+        }
+        for cmd, source in expect.items():
+            assert resolve_command_source(cmd, file_mode=True) == source, cmd

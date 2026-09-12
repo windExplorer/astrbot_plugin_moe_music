@@ -119,6 +119,19 @@
         "type": "bool",
         "default": true
     },
+    "file_quality": {
+        "description": "文件下载音质",
+        "hint": "「点歌文件」指令下载音乐文件时使用的音质，与普通点歌的默认音质相互独立；超过 API Key 上限时自动收敛到允许的最高音质",
+        "type": "string",
+        "options": ["128k", "192k", "320k", "flac", "flac24bit", "wav", "ape", "atmos", "dolby", "master"],
+        "default": "flac"
+    },
+    "file_embed_metadata": {
+        "description": "文件嵌入封面与歌词",
+        "hint": "「点歌文件」下载的文件是否写入标题/歌手/专辑/封面图片/歌词等标签（支持 mp3/flac/m4a），播放器可直接显示",
+        "type": "bool",
+        "default": true
+    },
     "recall_candidate": {
         "description": "选歌后撤回候选列表",
         "hint": "用户选完歌（或取消/超时）后自动撤回之前发送的候选列表消息，减少刷屏。仅 QQ(aiocqhttp) 平台可用，其他平台自动忽略",

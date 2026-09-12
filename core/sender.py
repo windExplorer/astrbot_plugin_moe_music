@@ -5,12 +5,16 @@
 - ``record_link`` / ``record_local``：语音链接 / 本地语音；
 - ``file_link`` / ``file_local``：文件链接 / 本地文件；
 - ``text``：纯文本临时链接兜底。
+
+「点歌文件」指令走独立的 :class:`DeliveryOptions`（固定只用 ``file_local``、独立音质与
+嵌入开关），与普通点歌的配置互不影响。
 """
 
 import asyncio
 import re
 import time
 import traceback
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import logger
@@ -25,9 +29,54 @@ from .onebot import call_action_of, to_onebot_id
 # 非法文件名字符
 _FILENAME_STRIP = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
+# 「点歌文件」指令固定只用本地文件：下载后发文件，失败即提示，不降级为链接
+FILE_ONLY_MODES = ["file_local"]
+
 
 def _safe_filename(name: str) -> str:
     return _FILENAME_STRIP.sub("_", name).strip("_ ") or "audio"
+
+
+def _log_quality_result(track: Track, wanted: str, requested: str, audio: dict) -> None:
+    """记录音质完整链路：期望 → 实际请求 → 后端实得（含来源）。
+
+    排查「配了音质却没生效」时靠这一条日志即可区分两类原因：
+    1. 期望超出本 Key 上限：wanted ≠ requested（被收敛后才请求）；
+    2. 后端命中本地曲库：实得的是曲库里已有文件的音质，与请求可能不一致。
+    """
+    got = str(audio.get("quality") or "") or "未知"
+    origin = "本地曲库" if audio.get("fromLocal") else "上游取链"
+    if requested != wanted:
+        logger.warning(
+            f"[萌音点歌] 音质 {wanted} 超出本 Key 允许范围，已收敛为 {requested}：《{track.display}》"
+        )
+    if got != "未知" and got != requested:
+        logger.warning(
+            f"[萌音点歌] 后端实得音质 {got} 与请求 {requested} 不一致（{origin}）：《{track.display}》"
+        )
+    logger.info(
+        f"[萌音点歌] 音质结果：期望 {wanted} → 请求 {requested} → 实得 {got}（{origin}）：《{track.display}》"
+    )
+
+
+@dataclass(slots=True)
+class DeliveryOptions:
+    """一次发送的策略：普通点歌与「点歌文件」指令的差异都收敛在这里。
+
+    ``None``（调用方不传）表示走 PluginConfig 的默认策略，即普通点歌，行为与历史一致。
+    """
+
+    quality: str
+    """期望音质（解析播放链接时使用；超过 Key 上限会自动收敛到允许的最高音质）。"""
+
+    modes: list[str] = field(default_factory=list)
+    """发送方式与降级顺序。"""
+
+    embed_metadata: bool = True
+    """本地文件发送时是否写入标题/歌手/专辑/封面/歌词标签。"""
+
+    fail_hint: str = "这首歌暂时发不出来，换一首试试吧～"
+    """所有发送方式都失败时给用户的提示（文件指令用自己的文案）。"""
 
 
 class SongSender:
@@ -42,9 +91,14 @@ class SongSender:
     # ============ 对外入口 ============
 
     async def send_track(
-        self, event, track: Track, record_ctx: dict | None = None, timings: dict | None = None
+        self,
+        event,
+        track: Track,
+        record_ctx: dict | None = None,
+        timings: dict | None = None,
+        options: DeliveryOptions | None = None,
     ) -> bool:
-        """发送一首歌：解析播放链接（含音质收敛）→ 按 send_modes 降级发送。
+        """发送一首歌：解析播放链接（含音质收敛）→ 按发送方式降级发送。
 
         Args:
             record_ctx: 点歌记录上下文（用户/会话/选歌方式等），发送成功后
@@ -52,6 +106,8 @@ class SongSender:
             timings: 可变字典，写入本次发送各阶段耗时（毫秒）与嵌入结果，
                      供 play_records 统计：resolve_ms / download_ms / embed_ms /
                      send_ms / queue_wait_ms / total_ms / metadata_embedded。
+            options: 发送策略覆盖（音质 / 发送方式 / 是否嵌入元数据）；
+                     None = 使用插件配置的默认策略（普通点歌）。
 
         Returns:
             bool: 是否发送成功。
@@ -60,9 +116,13 @@ class SongSender:
         # 端到端起点：调用方（service）在点歌命令进入时记录；未提供则以发送任务开始计
         t_start = float(timings.pop("_flow_start", 0.0)) or time.monotonic()
 
+        wanted_quality = options.quality if options else self.cfg.default_quality
+        modes = options.modes if options else self.cfg.send_modes
+        embed = options.embed_metadata if options else self.cfg.embed_metadata
+
         try:
             t0 = time.monotonic()
-            audio = await self.resolve_play_url(track)
+            audio = await self.resolve_play_url(track, wanted=wanted_quality)
             timings["resolve_ms"] = int((time.monotonic() - t0) * 1000)
         except ApiError as e:
             logger.error(f"[萌音点歌] 获取播放链接失败：code={e.code} {e.message}（{track.id}）")
@@ -72,9 +132,7 @@ class SongSender:
 
         cover_url = ""
         # 卡片（展示封面）/ 开启元数据嵌入的本地文件模式 才需要封面；失败不影响发送主流程
-        need_cover = "card" in self.cfg.send_modes or (
-            self.cfg.embed_metadata and "file_local" in self.cfg.send_modes
-        )
+        need_cover = "card" in modes or (embed and "file_local" in modes)
         if need_cover:
             try:
                 cover_url = await self.api.pic(track.id) or ""
@@ -82,18 +140,26 @@ class SongSender:
                 logger.warning(f"[萌音点歌] 获取封面失败：code={e.code}（{track.id}）")
 
         audio_url_raw = audio.get("url", "")
-        quality = str(audio.get("quality", self.cfg.default_quality))
+        quality = str(audio.get("quality", wanted_quality))
         # 发给用户的链接用对外可达地址（publicize）；插件自己下载仍走后端原地址（内网更快）
         audio_url = self.api.publicize(audio_url_raw)
-        timings["quality_requested"] = self.cfg.default_quality
-        timings["quality_fallback"] = int(quality != self.cfg.default_quality)
+        timings["quality_requested"] = wanted_quality
+        timings["quality_fallback"] = int(quality != wanted_quality)
         timings["expires_at"] = str(audio.get("expiresAt") or "") or None
 
-        for mode in self.cfg.send_modes:
+        for mode in modes:
             t0 = time.monotonic()
             try:
                 sent = await self._dispatch(
-                    event, mode, track, audio_url, audio_url_raw, quality, cover_url, timings
+                    event,
+                    mode,
+                    track,
+                    audio_url,
+                    audio_url_raw,
+                    quality,
+                    cover_url,
+                    timings,
+                    embed_metadata=embed,
                 )
             except Exception:
                 logger.error(f"[萌音点歌] 发送模式 {mode} 未捕获异常：\n{traceback.format_exc()}")
@@ -120,23 +186,32 @@ class SongSender:
 
         _finalize_timings(timings, t_start)
         logger.error(f"[萌音点歌] 所有发送模式均失败：《{track.display}》")
-        await event.send(event.plain_result("这首歌暂时发不出来，换一首试试吧～"))
+        await event.send(
+            event.plain_result(
+                options.fail_hint if options else "这首歌暂时发不出来，换一首试试吧～"
+            )
+        )
         return False
 
     # ============ 播放链接解析 ============
 
-    async def resolve_play_url(self, track: Track) -> dict:
+    async def resolve_play_url(self, track: Track, wanted: str | None = None) -> dict:
         """获取播放链接；音质超 Key 上限（4220）时自动收敛重取。
 
         收敛依据优先级：Key 的 maxQuality（自检缓存）→ 曲目可用音质列表 → 逐级降档。
+
+        Args:
+            wanted: 期望音质；None 表示用配置里的默认音质（普通点歌）。
+                    「点歌文件」指令传入 ``file_quality``。
         """
-        wanted = self.cfg.default_quality
+        wanted = wanted or self.cfg.default_quality
         candidates: list[str] = []
 
-        key_max = self.api.key_max_quality
-        if key_max and 0 <= quality_rank(key_max) < quality_rank(wanted):
-            candidates.append(key_max)
-        candidates.append(wanted)
+        # 先按 Key 允许的上限收敛（后端对超出上限的显式音质是 422 拒绝，不是静默降级）
+        allowed = self.api.clamp_quality(wanted)
+        candidates.append(allowed)
+        if allowed != wanted:
+            candidates.append(wanted)  # 上限缓存可能过期：仍留一次原始期望
         # 曲目自身可用音质从高到低补充为候选
         for q in sorted(track.qualitys, key=quality_rank, reverse=True):
             if q not in candidates:
@@ -150,8 +225,7 @@ class SongSender:
         for q in candidates:
             try:
                 audio = await self.api.play_url(track.id, q)
-                if q != wanted:
-                    logger.warning(f"[萌音点歌] 音质 {wanted} 超限，已收敛为 {q}：《{track.display}》")
+                _log_quality_result(track, wanted, q, audio)
                 return audio
             except ApiError as e:
                 if e.code == 4220:
@@ -161,7 +235,12 @@ class SongSender:
         # 终极兜底：不传 quality，让后端按 Key 的默认音质签发
         # （个别后端配置/版本下可能拒绝所有显式音质，此时省略参数最稳妥）
         try:
-            return await self.api.play_url(track.id)
+            audio = await self.api.play_url(track.id)
+            logger.warning(
+                f"[萌音点歌] 显式音质均被拒，改由后端按 Key 默认音质签发："
+                f"实得 {audio.get('quality') or '未知'}：《{track.display}》"
+            )
+            return audio
         except ApiError as e:
             if e.code != 4220:
                 raise
@@ -179,6 +258,7 @@ class SongSender:
         quality: str,
         cover_url: str,
         timings: dict,
+        embed_metadata: bool = True,
     ) -> bool:
         """audio_url 为对外可达链接（发给用户的）；audio_url_raw 为后端原链接（插件自己下载用）。"""
         if mode == "card":
@@ -190,7 +270,9 @@ class SongSender:
         if mode == "file_link":
             return await self._send_file_link(event, track, audio_url, quality)
         if mode == "file_local":
-            return await self._send_file_local(event, track, audio_url_raw, quality, cover_url, timings)
+            return await self._send_file_local(
+                event, track, audio_url_raw, quality, cover_url, timings, embed_metadata
+            )
         if mode == "text":
             return await self._send_text(event, track, audio_url)
         logger.warning(f"[萌音点歌] 未知的发送模式：{mode}")
@@ -276,6 +358,7 @@ class SongSender:
         quality: str,
         cover_url: str = "",
         timings: dict | None = None,
+        embed_metadata: bool = True,
     ) -> bool:
         if not audio_url:
             return False
@@ -283,7 +366,7 @@ class SongSender:
         path = await self._download_audio(track, audio_url, quality, timings)
         if not path:
             return False
-        if self.cfg.embed_metadata:
+        if embed_metadata:
             await self._embed_track_metadata(path, track, cover_url, timings)
         seg = File(name=path.name, file=str(path))
         await event.send(event.chain_result([seg]))

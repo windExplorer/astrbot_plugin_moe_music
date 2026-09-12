@@ -59,6 +59,36 @@ def make_client(base_url: str) -> MusicApiClient:
     return MusicApiClient(base_url=base_url, api_key="sk-test1234567890", request_timeout=5)
 
 
+class TestClampQuality:
+    """期望音质收敛到本 Key 的上限。
+
+    后端对「显式传了超出 Key 上限的音质」是 422 拒绝（不是静默降级），所以任何显式
+    带 quality 的请求都要先收敛，否则会莫名失败（搜索尤其明显）。
+    """
+
+    @staticmethod
+    def _client(key_max: str | None) -> MusicApiClient:
+        client = MusicApiClient(base_url="http://127.0.0.1:1", api_key="sk-test1234567890")
+        client.key_max_quality = key_max
+        return client
+
+    def test_no_key_limit_keeps_quality(self):
+        assert self._client(None).clamp_quality("master") == "master"
+
+    def test_clamps_down_to_key_limit(self):
+        client = self._client("flac")
+        assert client.clamp_quality("master") == "flac"
+        assert client.clamp_quality("flac24bit") == "flac"
+
+    def test_never_upgrades_lower_quality(self):
+        client = self._client("flac")
+        assert client.clamp_quality("320k") == "320k"
+        assert client.clamp_quality("flac") == "flac"
+
+    def test_unknown_limit_does_not_clamp(self):
+        assert self._client("weird").clamp_quality("master") == "master"
+
+
 class TestAuthAndParsing:
     async def test_bearer_token_and_ok_response(self, backend):
         fb, base_url = backend

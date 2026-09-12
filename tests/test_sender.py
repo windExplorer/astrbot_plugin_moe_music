@@ -7,7 +7,7 @@ from aiohttp import web
 from astrbot_plugin_moe_music.core.api_client import ApiError, MusicApiClient
 from astrbot_plugin_moe_music.core.config import PluginConfig
 from astrbot_plugin_moe_music.core.model import Track
-from astrbot_plugin_moe_music.core.sender import SongSender
+from astrbot_plugin_moe_music.core.sender import FILE_ONLY_MODES, DeliveryOptions, SongSender
 
 # 复用 conftest stub 的消息组件与 aiocqhttp 事件类
 _comp = sys.modules["astrbot.api.message_components"]
@@ -279,3 +279,89 @@ class TestPublicUrlRouting:
             data = payload["message"][0]["data"]
             assert data["audio"] == "https://music.example.com/api/temp/t"
             assert data["url"] == "https://music.example.com/api/temp/t"
+
+
+class TestDeliveryOptions:
+    """「点歌文件」指令的独立发送策略（v0.11.0）。"""
+
+    async def test_quality_comes_from_options(self, tmp_path):
+        """音质取 options.quality（file_quality），不受 default_quality 影响。"""
+        async with FakeUrlBackend([ok_url("flac")], audio_bytes=b"ID3audio") as api:
+            sender = make_sender(api, modes=["record_link"], overrides={"default_quality": "320k"})
+            sender.download_dir = tmp_path
+            ok = await sender.send_track(
+                MockEvent(),
+                make_track(),
+                options=DeliveryOptions(quality="flac", modes=list(FILE_ONLY_MODES)),
+            )
+            assert ok
+            assert api.calls == ["flac"]  # 请求的是文件音质，而非配置里的 320k
+
+    async def test_sends_file_component(self, tmp_path):
+        """固定走 file_local：发出的是文件本体（File 组件），不是卡片/语音。"""
+        async with FakeUrlBackend([ok_url("flac")], audio_bytes=b"ID3audio") as api:
+            sender = make_sender(api, modes=["record_link", "text"])
+            sender.download_dir = tmp_path
+            event = MockEvent()
+            ok = await sender.send_track(
+                event,
+                make_track(),
+                options=DeliveryOptions(quality="flac", modes=list(FILE_ONLY_MODES)),
+            )
+            assert ok
+            assert event.sent[0][0] == "chain"
+            assert type(event.sent[0][1][0]).__name__ == "File"
+
+    async def test_embed_metadata_toggle(self, tmp_path):
+        """embed_metadata=False 时不写标签；True 时才嵌入封面/歌词。"""
+        async with FakeUrlBackend([ok_url("flac"), ok_url("flac")], audio_bytes=b"ID3audio") as api:
+            sender = make_sender(api, modes=["file_local"])
+            sender.download_dir = tmp_path
+            embedded: list = []
+
+            async def _spy(path, track, cover_url, timings):
+                embedded.append(path)
+
+            sender._embed_track_metadata = _spy
+
+            off = await sender.send_track(
+                MockEvent(),
+                make_track(),
+                options=DeliveryOptions(quality="flac", modes=["file_local"], embed_metadata=False),
+            )
+            assert off and embedded == []
+
+            on = await sender.send_track(
+                MockEvent(),
+                make_track(),
+                options=DeliveryOptions(quality="flac", modes=["file_local"], embed_metadata=True),
+            )
+            assert on and len(embedded) == 1
+
+    async def test_no_link_fallback_and_custom_hint(self):
+        """file_local 失败即失败：不降级为链接，并给出文件专用提示。"""
+        async with FakeUrlBackend([ok_url("flac")]) as api:  # 无 audio_bytes → 下载失败
+            sender = make_sender(api, modes=["text"])
+            event = MockEvent()
+            ok = await sender.send_track(
+                event,
+                make_track(),
+                options=DeliveryOptions(
+                    quality="flac",
+                    modes=list(FILE_ONLY_MODES),
+                    fail_hint="文件下载失败了，换一首或稍后再试试吧～",
+                ),
+            )
+            assert not ok
+            assert event.sent == [("plain", "文件下载失败了，换一首或稍后再试试吧～")]
+
+    async def test_defaults_unchanged_without_options(self, tmp_path):
+        """不传 options 时保持普通点歌行为：用配置的音质与发送方式。"""
+        async with FakeUrlBackend([ok_url("320k")], audio_bytes=b"ID3audio") as api:
+            sender = make_sender(api, modes=["file_local"], overrides={"default_quality": "320k"})
+            sender.download_dir = tmp_path
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track())
+            assert ok
+            assert api.calls == ["320k"]
+            assert type(event.sent[0][1][0]).__name__ == "File"

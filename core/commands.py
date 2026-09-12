@@ -25,7 +25,7 @@ from .config import COMMAND_SOURCE_ALIAS, PluginConfig
 from .lyrics_render import LyricsRenderer
 from .model import Track
 from .onebot import call_action_of, message_id_payload, send_message_via_onebot
-from .sender import SongSender, send_lyrics_image
+from .sender import FILE_ONLY_MODES, DeliveryOptions, SongSender, send_lyrics_image
 from .songlist_render import SonglistRenderer
 from .storage import RecordStore
 
@@ -152,18 +152,26 @@ class MoeMusicService:
         ctx: dict,
         trigger_type: str,
         queue_wait_ms: int = 0,
+        search_quality: str | None = None,
     ) -> list[Track] | None:
         """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 None。
 
         后端音源被连续请求短暂冷却时会返回空结果（实测存在），因此空结果
         间隔 3 秒自动重试一次，仍为空才判定无结果。
+
+        Args:
+            search_quality: 显式传给搜索接口的音质（None = 普通点歌音质）。会先按本
+                Key 上限收敛——后端对超出上限的显式音质直接 422，不收敛会导致搜索失败。
         """
         started = time.monotonic()
         tracks = None
         for attempt in (1, 2):
             try:
                 tracks = await self.api.search(
-                    keyword=keyword, limit=limit, source=source or None, quality=self.cfg.default_quality
+                    keyword=keyword,
+                    limit=limit,
+                    source=source or None,
+                    quality=self.api.clamp_quality(search_quality or self.cfg.default_quality),
                 )
             except ApiError as e:
                 duration_ms = int((time.monotonic() - started) * 1000)
@@ -204,6 +212,18 @@ class MoeMusicService:
 
     # ============ 点歌 ============
 
+    def _file_delivery(self) -> DeliveryOptions:
+        """「点歌文件」指令的发送策略：只下载文件，音质与嵌入开关独立配置。
+
+        不做链接降级——「点歌文件」的语义就是拿到文件本体，失败时明确告知而非糊弄。
+        """
+        return DeliveryOptions(
+            quality=self.cfg.file_quality,
+            modes=list(FILE_ONLY_MODES),
+            embed_metadata=self.cfg.file_embed_metadata,
+            fail_hint="文件下载失败了，换一首或稍后再试试吧～",
+        )
+
     async def handle_song_request(
         self,
         event: AstrMessageEvent,
@@ -211,8 +231,17 @@ class MoeMusicService:
         source: str = "",
         index_hint: int = 0,
         command: str = "点歌",
+        file_mode: bool = False,
     ) -> None:
-        """处理一次点歌请求（访问检查 → 入队搜索 → 直发 / 候选列表 → 等待选号 → 入队发送）。"""
+        """处理一次点歌请求（访问检查 → 入队搜索 → 直发 / 候选列表 → 等待选号 → 入队发送）。
+
+        Args:
+            file_mode: True 表示「点歌文件」指令——流程与点歌完全一致，只是发送阶段
+                       走独立的文件策略（``file_local`` + ``cfg.file_quality`` +
+                       ``cfg.file_embed_metadata``），且不追加歌词图片。
+        """
+        delivery = self._file_delivery() if file_mode else None
+
         ctx = await self._collect_context(event)
         if not await self._check_access(event, ctx):
             return
@@ -223,7 +252,14 @@ class MoeMusicService:
         # 搜索任务入队（排队耗时记入 search_records.queue_wait_ms）
         async def _search_job(queue_wait_ms=0):
             return await self._search_with_record(
-                event, keyword, self.cfg.song_limit, source, ctx, "command", queue_wait_ms=queue_wait_ms
+                event,
+                keyword,
+                self.cfg.song_limit,
+                source,
+                ctx,
+                "command",
+                queue_wait_ms=queue_wait_ms,
+                search_quality=self.cfg.file_quality if file_mode else None,
             )
 
         try:
@@ -246,6 +282,7 @@ class MoeMusicService:
                 tracks[index_hint - 1],
                 record_ctx={**record_base, "selected_index": index_hint, "selection_type": "direct_index"},
                 flow_start=flow_start,
+                delivery=delivery,
             )
             return
 
@@ -262,16 +299,24 @@ class MoeMusicService:
                 tracks[0],
                 record_ctx={**record_base, "selected_index": 1, "selection_type": "single"},
                 flow_start=flow_start,
+                delivery=delivery,
             )
             return
 
-        candidate_id = await self._send_candidate_list(event, keyword, tracks)
+        candidate_id = await self._send_candidate_list(event, keyword, tracks, delivery=delivery)
         if warned:
             logger.debug(f"[萌音点歌] 命令序号超范围，已引导重新选择：{index_hint}")
-        await self._wait_for_selection(event, tracks, record_base, candidate_id, flow_start)
+        await self._wait_for_selection(
+            event, tracks, record_base, candidate_id, flow_start, delivery=delivery
+        )
 
     async def _send_via_queue(
-        self, event, track: Track, record_ctx: dict, flow_start: float | None = None
+        self,
+        event,
+        track: Track,
+        record_ctx: dict,
+        flow_start: float | None = None,
+        delivery: DeliveryOptions | None = None,
     ) -> bool:
         """发送任务入队（排队耗时记入 play_records.queue_wait_ms）；队满时提示繁忙。"""
         timings: dict = {}
@@ -280,7 +325,9 @@ class MoeMusicService:
 
         async def _send_job(queue_wait_ms=0):
             timings["queue_wait_ms"] = queue_wait_ms
-            return await self._send_track(event, track, record_ctx=record_ctx, timings=timings)
+            return await self._send_track(
+                event, track, record_ctx=record_ctx, timings=timings, delivery=delivery
+            )
 
         try:
             return await self._run_task(_send_job)
@@ -290,7 +337,11 @@ class MoeMusicService:
             return False
 
     async def _send_candidate_list(
-        self, event: AstrMessageEvent, keyword: str, tracks: list[Track]
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        tracks: list[Track],
+        delivery: DeliveryOptions | None = None,
     ) -> int | str | None:
         """发送候选列表：图片菜单（带封面）或文本列表，图片失败自动回退文本。
 
@@ -326,7 +377,10 @@ class MoeMusicService:
                     await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
                     return None
 
-            lines = [f"为【{keyword}】找到 {len(tracks)} 首，回复序号点歌（回复“取消”退出）："]
+            action_text = "下载文件" if delivery else "点歌"
+            lines = [
+                f"为【{keyword}】找到 {len(tracks)} 首，回复序号{action_text}（回复“取消”退出）："
+            ]
             for i, track in enumerate(tracks, 1):
                 duration = f" [{track.duration_text()}]" if track.duration_text() else ""
                 lines.append(f"{i}. {track.display}（{track.source_name}）{duration}")
@@ -406,6 +460,7 @@ class MoeMusicService:
         record_base: dict,
         candidate_id: int | str | None = None,
         flow_start: float | None = None,
+        delivery: DeliveryOptions | None = None,
     ) -> None:
         """session_waiter 等待用户回复序号；结束后撤回候选列表（选中/取消/超范围/超时）。"""
 
@@ -441,6 +496,7 @@ class MoeMusicService:
                 tracks[n - 1],
                 record_ctx={**record_base, "selected_index": n, "selection_type": "picked"},
                 flow_start=flow_start,
+                delivery=delivery,
             )
             await self._recall_message(ev, candidate_id)
 
@@ -492,10 +548,16 @@ class MoeMusicService:
         track: Track,
         record_ctx: dict | None = None,
         timings: dict | None = None,
+        delivery: DeliveryOptions | None = None,
     ) -> bool:
-        """发送歌曲的统一入口；开启 enable_lyrics 时成功后静默追加歌词图片。"""
-        sent = await self.sender.send_track(event, track, record_ctx=record_ctx, timings=timings)
-        if sent and self.cfg.enable_lyrics:
+        """发送歌曲的统一入口；开启 enable_lyrics 时成功后静默追加歌词图片。
+
+        delivery 非空（「点歌文件」指令）时不再追加歌词图片——歌词已写进文件标签。
+        """
+        sent = await self.sender.send_track(
+            event, track, record_ctx=record_ctx, timings=timings, options=delivery
+        )
+        if sent and delivery is None and self.cfg.enable_lyrics:
             try:
                 await self.send_lyrics_for_track(event, track, quiet=True)
             except Exception:

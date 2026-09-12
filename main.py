@@ -22,7 +22,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from .core.access import AccessController
 from .core.api_client import ApiError, MusicApiClient
 from .core.commands import MoeMusicService
-from .core.config import COMMAND_SOURCE_ALIAS, LLM_SOURCE_ALIAS, PluginConfig
+from .core.config import LLM_SOURCE_ALIAS, PluginConfig, resolve_command_source
 from .core.lyrics_render import LyricsRenderer
 from .core.queue import SongTaskQueue
 from .core.sender import SongSender
@@ -43,10 +43,19 @@ SONG_COMMAND_ALIASES = {
     "咪咕点歌",
 }
 
+# 「点歌文件」指令全部别名：与点歌别名同构（点歌名 + “文件”），含大小写变体
+FILE_COMMAND_ALIASES = {f"{name}文件" for name in SONG_COMMAND_ALIASES}
+
 USAGE_HINT = (
     "用法：点歌 <歌名> [序号]\n"
     "也可以用：网易点歌 / QQ点歌 / 酷狗点歌 / 酷我点歌 / 咪咕点歌 <歌名>\n"
     "查歌词：<歌名> 前加「查歌词」哦～"
+)
+
+FILE_USAGE_HINT = (
+    "用法：点歌文件 <歌名> [序号]\n"
+    "也可以用：网易点歌文件 / QQ点歌文件 / 酷狗点歌文件 / 酷我点歌文件 / 咪咕点歌文件 <歌名>\n"
+    "会下载音乐文件并写入封面与歌词（音质可在配置里单独调整）～"
 )
 
 
@@ -156,6 +165,10 @@ class MoeMusicPlugin(Star):
         self.service.access = self.access
         logger.info(f"[萌音点歌] 已通过 WebUI 更新配置：{sorted(clean)}（队列并发数等结构性配置重启后生效）")
 
+        # Key 限额缓存（音质上限 / QPS）会因换 Key 或后端调整而失效——不刷新就会按过期
+        # 上限错误收敛音质（表现为「配置的音质不生效」）。保存后后台重新自检一次。
+        asyncio.create_task(self._startup_probe())
+
     async def _startup_probe(self):
         """启动自检：成功则更新 Key 限额缓存；失败仅记日志。"""
         try:
@@ -185,7 +198,7 @@ class MoeMusicPlugin(Star):
             return
 
         cmd, _, arg = event.message_str.strip().partition(" ")
-        source = COMMAND_SOURCE_ALIAS.get(cmd.lower(), "")
+        source = resolve_command_source(cmd)
         arg = arg.strip()
 
         # 解析尾部序号（“点歌 晴天 1” → index=1）
@@ -207,6 +220,44 @@ class MoeMusicPlugin(Star):
         except Exception:
             logger.error(f"[萌音点歌] 点歌处理异常：\n{traceback.format_exc()}")
             await event.send(event.plain_result("点歌出了点小问题，请稍后再试～"))
+        finally:
+            event.stop_event()
+
+    @filter.command("点歌文件", alias=FILE_COMMAND_ALIASES)
+    async def song_file_command(self, event: AstrMessageEvent):
+        """点歌文件 / 网易点歌文件 / QQ点歌文件 / 酷狗点歌文件 <歌名> [序号]
+
+        平台前缀别名与点歌一致（网易 / QQ / 腾讯 / 酷狗 / 酷我 / 咪咕）+「点歌文件」。
+        下载音乐文件（内嵌封面与歌词），音质与普通点歌分开配置；流程同点歌。
+        """
+
+        if not self._check_ready(event):
+            return
+
+        cmd, _, arg = event.message_str.strip().partition(" ")
+        # 平台识别：命令去掉「文件」后缀后与点歌别名同构，复用同一张映射表
+        source = resolve_command_source(cmd, file_mode=True)
+        arg = arg.strip()
+
+        # 解析尾部序号（“点歌文件 晴天 1” → index=1）
+        index_hint = 0
+        tokens = arg.split()
+        if len(tokens) >= 2 and tokens[-1].isdigit():
+            index_hint = int(tokens[-1])
+            arg = " ".join(tokens[:-1])
+
+        if not arg:
+            await event.send(event.plain_result(FILE_USAGE_HINT))
+            event.stop_event()
+            return
+
+        try:
+            await self.service.handle_song_request(
+                event, arg, source=source, index_hint=index_hint, command=cmd, file_mode=True
+            )
+        except Exception:
+            logger.error(f"[萌音点歌] 点歌文件处理异常：\n{traceback.format_exc()}")
+            await event.send(event.plain_result("下载文件出了点小问题，请稍后再试～"))
         finally:
             event.stop_event()
 

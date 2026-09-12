@@ -100,6 +100,8 @@ _EDITABLE_KEYS = {
     "queue_max_pending",
     "enable_lyrics",
     "embed_metadata",
+    "file_quality",
+    "file_embed_metadata",
     "recall_candidate",
     "proxy",
     "enable_self_test",

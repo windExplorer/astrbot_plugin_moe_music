@@ -789,3 +789,54 @@ class TestRecallCandidate:
             await service.handle_song_request(event, "晴天")
             # 不报错、正常发送即可（无撤回能力）
             assert any("chain" in item[0] or "plain" in item[0] for item in event.sent)
+
+
+class TestFileCommandFlow:
+    """「点歌文件」指令（v0.11.0）：流程同点歌，候选列表文案与发送策略区分开。"""
+
+    async def test_candidate_list_says_download(self):
+        async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
+            service = make_service(api)
+
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", file_mode=True)
+            texts = [item[1] for item in event.sent if item[0] == "plain"]
+            assert any("回复序号下载文件" in t for t in texts)
+
+            # 普通点歌文案不受影响
+            event2 = MockEvent()
+            await service.handle_song_request(event2, "晴天")
+            texts2 = [item[1] for item in event2.sent if item[0] == "plain"]
+            assert any("回复序号点歌" in t for t in texts2)
+
+    async def test_file_delivery_uses_independent_settings(self):
+        """文件指令策略：只走 file_local，音质与嵌入开关取 file_* 配置。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"file_quality": "master", "file_embed_metadata": False})
+            delivery = service._file_delivery()
+            assert delivery.modes == ["file_local"]
+            assert delivery.quality == "master"
+            assert delivery.embed_metadata is False
+
+    async def test_file_mode_skips_lyrics_image(self):
+        """文件模式不追加歌词图（歌词已写进文件标签）；普通点歌仍然追加。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service = make_service(api, {"enable_lyrics": True})
+            appended: list = []
+
+            async def _lyrics_spy(event, track, quiet=False):
+                appended.append(track)
+                return True
+
+            async def _send_ok(*args, **kwargs):
+                return True
+
+            service.send_lyrics_for_track = _lyrics_spy
+            service.sender.send_track = _send_ok
+            track = Track.from_api(track_json(1))
+
+            await service._send_track(MockEvent(), track, delivery=service._file_delivery())
+            assert appended == []  # 文件模式：不追加
+
+            await service._send_track(MockEvent(), track)
+            assert len(appended) == 1  # 普通点歌：照常追加
