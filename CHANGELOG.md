@@ -2,6 +2,17 @@
 
 本文件记录 astrbot_plugin_moe_music 的版本变更，最新版本在最上方。
 
+## v0.6.0 - 2026-09-12
+
+### 新增
+
+- 点歌任务队列：多用户同时点歌时按「点歌并发数」（`queue_concurrency`，默认 2）排队处理，防止高峰期请求与下载无序堆积；等待队列有上限（`queue_max_pending`，默认 20），队满时新请求直接提示繁忙而非无限堆积。排队等待时间一并写入记录（`queue_wait_ms`）。
+- 记录库时间统计字段全面补齐（旧库打开自动迁移，数据无损）：
+  - 时间双存储：`created_at`（ISO 本地时间）+ `ts`（unix 时间戳，统计排序/区间过滤用）；
+  - 全链路耗时埋点（play_records）：`queue_wait_ms` 排队、`search_ms` 搜索、`resolve_ms` 取播放链接、`download_ms` 下载、`embed_ms` 元数据嵌入、`send_ms` 发送动作、`total_ms` 全流程；
+  - 播放细节补充：`expires_at` 临时链接过期时间、`quality_requested` 期望音质与 `quality_fallback` 是否发生音质降级、`metadata_embedded` 元数据嵌入结果。
+- 「点歌自检」回显任务队列状态（并发数 / 等待中 / 累计提交 / 累计拒绝）。
+
 ## v0.5.0 - 2026-09-12
 
 ### 新增

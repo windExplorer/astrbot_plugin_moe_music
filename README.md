@@ -30,6 +30,8 @@
 | `selection_display` | 候选列表显示方式：`text` 文本列表 / `image` 图片菜单（带封面，渲染失败自动回退文本） | `text` |
 | `send_modes` | 发送方式与优先级 | `card, record_link, file_local, text` |
 | `timeout` | 选歌等待超时（秒） | `15` |
+| `queue_concurrency` | 点歌并发数（多用户同时点歌时的排队并发上限） | `2` |
+| `queue_max_pending` | 排队上限（超出的点歌请求直接提示繁忙） | `20` |
 | `request_timeout` | 单次 HTTP 超时（秒） | `10` |
 | `enable_lyrics` | 点歌成功后追加歌词图片 | `false` |
 | `embed_metadata` | 本地文件模式嵌入封面/歌词/标题等元数据（mp3/flac/m4a） | `true` |

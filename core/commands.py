@@ -38,6 +38,8 @@ class _UserSessionFilter(SessionFilter):
 class MoeMusicService:
     """点歌业务服务。"""
 
+    QUEUE_BUSY_HINT = "点歌的人有点多啦，稍等一下再试吧～"
+
     def __init__(
         self,
         config: PluginConfig,
@@ -47,6 +49,7 @@ class MoeMusicService:
         songlist_renderer: SonglistRenderer,
         store: RecordStore | None = None,
         access: AccessController | None = None,
+        queue=None,
     ):
         self.cfg = config
         self.api = api
@@ -55,6 +58,13 @@ class MoeMusicService:
         self.songlist_renderer = songlist_renderer
         self.store = store
         self.access = access
+        self.queue = queue  # SongTaskQueue；None 表示直通执行（测试/降级）
+
+    async def _run_task(self, fn, *args, **kwargs):
+        """任务入队执行（排队耗时由 worker 注入 fn 的 queue_wait_ms 参数）；队满抛 QueueFull。"""
+        if self.queue is not None:
+            return await self.queue.submit(fn, *args, **kwargs)
+        return await fn(*args, queue_wait_ms=0, **kwargs)
 
     # ============ 上下文 / 访问控制 / 记录 ============
 
@@ -108,6 +118,7 @@ class MoeMusicService:
         source: str,
         ctx: dict,
         trigger_type: str,
+        queue_wait_ms: int = 0,
     ) -> list[Track] | None:
         """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 None。"""
         started = time.monotonic()
@@ -127,6 +138,7 @@ class MoeMusicService:
                     success=0,
                     error_code=e.code,
                     duration_ms=duration_ms,
+                    queue_wait_ms=queue_wait_ms,
                     **ctx,
                 )
             await event.send(event.plain_result(e.user_hint))
@@ -140,6 +152,7 @@ class MoeMusicService:
                 result_count=len(tracks),
                 success=1,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                queue_wait_ms=queue_wait_ms,
                 **ctx,
             )
         return tracks
@@ -154,23 +167,34 @@ class MoeMusicService:
         index_hint: int = 0,
         command: str = "点歌",
     ) -> None:
-        """处理一次点歌请求（访问检查 → 搜索 → 直发 / 候选列表 → 等待选号 → 发送）。"""
+        """处理一次点歌请求（访问检查 → 入队搜索 → 直发 / 候选列表 → 等待选号 → 入队发送）。"""
         ctx = await self._collect_context(event)
         if not await self._check_access(event, ctx):
             return
 
-        tracks = await self._search_with_record(event, keyword, self.cfg.song_limit, source, ctx, "command")
+        record_base = {"trigger_type": "command", "command": command, "keyword": keyword, **ctx}
+
+        # 搜索任务入队（排队耗时记入 search_records.queue_wait_ms）
+        async def _search_job(queue_wait_ms=0):
+            return await self._search_with_record(
+                event, keyword, self.cfg.song_limit, source, ctx, "command", queue_wait_ms=queue_wait_ms
+            )
+
+        try:
+            tracks = await self._run_task(_search_job)
+        except asyncio.QueueFull:
+            await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
+            return
+
         if not tracks:
             if tracks is not None:
                 logger.info(f"[萌音点歌] 搜索无结果：{keyword}")
                 await event.send(event.plain_result("没有找到相关歌曲，换个关键词试试吧～"))
             return
 
-        record_base = {"trigger_type": "command", "command": command, "keyword": keyword, **ctx}
-
         # 一次到位：带序号且合法，直接发送
         if 0 < index_hint <= len(tracks):
-            await self._send_track(
+            await self._send_via_queue(
                 event,
                 tracks[index_hint - 1],
                 record_ctx={**record_base, "selected_index": index_hint, "selection_type": "direct_index"},
@@ -185,7 +209,7 @@ class MoeMusicService:
 
         # 单曲直发
         if len(tracks) == 1:
-            await self._send_track(
+            await self._send_via_queue(
                 event, tracks[0], record_ctx={**record_base, "selected_index": 1, "selection_type": "single"}
             )
             return
@@ -194,6 +218,21 @@ class MoeMusicService:
         if warned:
             logger.debug(f"[萌音点歌] 命令序号超范围，已引导重新选择：{index_hint}")
         await self._wait_for_selection(event, tracks, record_base)
+
+    async def _send_via_queue(self, event, track: Track, record_ctx: dict) -> bool:
+        """发送任务入队（排队耗时记入 play_records.queue_wait_ms）；队满时提示繁忙。"""
+        timings: dict = {}
+
+        async def _send_job(queue_wait_ms=0):
+            timings["queue_wait_ms"] = queue_wait_ms
+            return await self._send_track(event, track, record_ctx=record_ctx, timings=timings)
+
+        try:
+            return await self._run_task(_send_job)
+        except asyncio.QueueFull:
+            logger.warning(f"[萌音点歌] 发送任务被队列拒绝（队满）：《{track.display}》")
+            await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
+            return False
 
     async def _send_candidate_list(self, event: AstrMessageEvent, keyword: str, tracks: list[Track]) -> None:
         """发送候选列表：图片菜单（带封面）或文本列表，图片失败自动回退文本。"""
@@ -250,7 +289,7 @@ class MoeMusicService:
                 return
             controller.stop()
             ev.stop_event()
-            await self._send_track(
+            await self._send_via_queue(
                 ev, tracks[n - 1], record_ctx={**record_base, "selected_index": n, "selection_type": "picked"}
             )
 
@@ -277,7 +316,16 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return False
 
-        tracks = await self._search_with_record(event, keyword, 1, "", ctx, "command")
+        async def _search_job(queue_wait_ms=0):
+            return await self._search_with_record(
+                event, keyword, 1, "", ctx, "command", queue_wait_ms=queue_wait_ms
+            )
+
+        try:
+            tracks = await self._run_task(_search_job)
+        except asyncio.QueueFull:
+            await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
+            return False
         if not tracks:
             if tracks is not None:
                 await event.send(event.plain_result("没有找到相关歌曲，换个关键词试试吧～"))
@@ -285,10 +333,14 @@ class MoeMusicService:
         return await self.send_lyrics_for_track(event, tracks[0])
 
     async def _send_track(
-        self, event: AstrMessageEvent, track: Track, record_ctx: dict | None = None
+        self,
+        event: AstrMessageEvent,
+        track: Track,
+        record_ctx: dict | None = None,
+        timings: dict | None = None,
     ) -> bool:
         """发送歌曲的统一入口；开启 enable_lyrics 时成功后静默追加歌词图片。"""
-        sent = await self.sender.send_track(event, track, record_ctx=record_ctx)
+        sent = await self.sender.send_track(event, track, record_ctx=record_ctx, timings=timings)
         if sent and self.cfg.enable_lyrics:
             try:
                 await self.send_lyrics_for_track(event, track, quiet=True)
@@ -381,11 +433,29 @@ class MoeMusicService:
                 lines.append(f"已累计记录：搜索 {search_n} 次 / 点歌 {play_n} 首")
             except Exception:
                 pass
+        if self.queue:
+            lines.append(
+                f"任务队列：并发 {self.queue._concurrency}，等待中 {self.queue.pending}，"
+                f"累计提交 {self.queue.submitted}，累计拒绝 {self.queue.rejected}"
+            )
         lines.append("服务地址可达 ✓")
         await event.send(event.plain_result("\n".join(lines)))
         logger.info(f"[萌音点歌] 自检成功：{key_info.get('name', '<unnamed>')}")
 
     # ============ LLM Tool 共用 ============
+
+    async def _llm_search(self, event, keyword: str, source: str, ctx: dict) -> list[Track] | None | str:
+        """LLM 搜索任务入队；返回 tracks / None（失败已提示）/ 'busy'（队满）。"""
+
+        async def _job(queue_wait_ms=0):
+            return await self._search_with_record(
+                event, keyword, 1, source, ctx, "llm_tool", queue_wait_ms=queue_wait_ms
+            )
+
+        try:
+            return await self._run_task(_job)
+        except asyncio.QueueFull:
+            return "busy"
 
     async def llm_play_song(self, event: AstrMessageEvent, song_name: str, source: str = "") -> str:
         """LLM Tool：按歌名点歌并播放（发送第一首）。返回给 LLM 的结果文本。"""
@@ -393,24 +463,36 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return "用户没有点歌权限或当前会话未开放点歌"
 
-        tracks = await self._search_with_record(event, song_name, 1, source, ctx, "llm_tool")
+        tracks = await self._llm_search(event, song_name, source, ctx)
+        if tracks == "busy":
+            return "当前点歌人数较多，请稍后再试"
         if tracks is None:
             return "点歌失败：音乐服务暂时不可用"
         if not tracks:
             return f"没有找到《{song_name}》相关的歌曲"
         track = tracks[0]
-        sent = await self._send_track(
-            event,
-            track,
-            record_ctx={
-                "trigger_type": "llm_tool",
-                "command": "play_song_by_name",
-                "keyword": song_name,
-                "selected_index": 1,
-                "selection_type": "llm",
-                **ctx,
-            },
-        )
+        timings: dict = {}
+
+        async def _send_job(queue_wait_ms=0):
+            timings["queue_wait_ms"] = queue_wait_ms
+            return await self._send_track(
+                event,
+                track,
+                record_ctx={
+                    "trigger_type": "llm_tool",
+                    "command": "play_song_by_name",
+                    "keyword": song_name,
+                    "selected_index": 1,
+                    "selection_type": "llm",
+                    **ctx,
+                },
+                timings=timings,
+            )
+
+        try:
+            sent = await self._run_task(_send_job)
+        except asyncio.QueueFull:
+            return "当前点歌人数较多，请稍后再试"
         if not sent:
             return "歌曲发送失败，请稍后再试"
         return f"已为用户播放《{track.name}》- {track.singer}（{track.source_name}）"
@@ -421,7 +503,9 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return "用户没有点歌权限或当前会话未开放点歌"
 
-        tracks = await self._search_with_record(event, song_name, 1, "", ctx, "llm_tool")
+        tracks = await self._llm_search(event, song_name, "", ctx)
+        if tracks == "busy":
+            return "当前点歌人数较多，请稍后再试"
         if tracks is None:
             return "歌词查询失败：音乐服务暂时不可用"
         if not tracks:

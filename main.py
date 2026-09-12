@@ -24,6 +24,7 @@ from .core.api_client import ApiError, MusicApiClient
 from .core.commands import MoeMusicService
 from .core.config import COMMAND_SOURCE_ALIAS, LLM_SOURCE_ALIAS, PluginConfig
 from .core.lyrics_render import LyricsRenderer
+from .core.queue import SongTaskQueue
 from .core.sender import SongSender
 from .core.songlist_render import SonglistRenderer
 from .core.storage import RecordStore
@@ -67,6 +68,8 @@ class MoeMusicPlugin(Star):
         # 记录库：存 AstrBot 数据目录（不随插件卸载删除，供后续统计）
         self.store = RecordStore(Path(self._resolve_data_dir()) / "moe_music" / "records.db")
         self.access = AccessController(self.cfg)
+        # 点歌任务队列：限制并发、队满拒绝，排队耗时入统计
+        self.queue = SongTaskQueue(self.cfg.queue_concurrency, self.cfg.queue_max_pending)
         self.sender = SongSender(self.cfg, self.api, self.download_dir, store=self.store)
         font_path = Path(__file__).parent / "fonts" / "simhei.ttf"
         self.lyrics_renderer = LyricsRenderer(font_path)
@@ -79,6 +82,7 @@ class MoeMusicPlugin(Star):
             self.songlist_renderer,
             store=self.store,
             access=self.access,
+            queue=self.queue,
         )
 
     @staticmethod
@@ -110,8 +114,10 @@ class MoeMusicPlugin(Star):
             return
         logger.info(
             f"[萌音点歌] 初始化完成：服务 {self.cfg.api_base_url}，Key {self.cfg.key_masked}，"
-            f"默认音源 {self.cfg.default_source}，默认音质 {self.cfg.default_quality}"
+            f"默认音源 {self.cfg.default_source}，默认音质 {self.cfg.default_quality}，"
+            f"队列并发 {self.cfg.queue_concurrency}"
         )
+        await self.queue.start()
         asyncio.create_task(self._startup_probe())
 
     async def _startup_probe(self):
@@ -124,7 +130,8 @@ class MoeMusicPlugin(Star):
             logger.warning("[萌音点歌] 启动自检异常（网络不可达？）")
 
     async def terminate(self):
-        """插件卸载：释放 HTTP 会话、关闭记录库并清理临时目录。"""
+        """插件卸载：停止队列、释放 HTTP 会话、关闭记录库并清理临时目录。"""
+        await self.queue.stop()
         await self.api.close()
         await self.store.close()
         self.sender.cleanup_download_dir()

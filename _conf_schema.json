@@ -85,6 +85,28 @@
         },
         "default": 10
     },
+    "queue_concurrency": {
+        "description": "点歌并发数",
+        "hint": "多个用户同时点歌时，同时处理的任务数（搜索/发送各环节串过任务队列），超出部分排队等待",
+        "type": "int",
+        "slider": {
+            "min": 1,
+            "max": 5,
+            "step": 1
+        },
+        "default": 2
+    },
+    "queue_max_pending": {
+        "description": "排队上限",
+        "hint": "等待队列中的最大任务数，超过时新点歌请求直接提示繁忙（不无限堆积）",
+        "type": "int",
+        "slider": {
+            "min": 5,
+            "max": 50,
+            "step": 5
+        },
+        "default": 20
+    },
     "enable_lyrics": {
         "description": "点歌后附带歌词",
         "hint": "开启后点歌成功会追加发送一张歌词图片",
