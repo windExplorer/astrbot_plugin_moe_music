@@ -289,6 +289,7 @@ class TestPluginSmoke:
             "send_modes": ["card(音乐卡片)", "text(文本链接)"],
         }
         plugin = MoeMusicPlugin(context=None, config=cfg)
+        assert plugin.config["api_key"] == "sk-test1234567890"  # WebUI 配置页依赖
         assert plugin.cfg.api_key == "sk-test1234567890"
         assert plugin.cfg.send_modes == ["card", "text"]
         assert callable(plugin.song_command)

@@ -20,11 +20,31 @@ const theme = computed(() => (dark.value ? darkTheme : null));
 
 const bridgeError = inject<string | null>("bridgeError", null);
 
-const hash = ref((location.hash || "#stats").replace("#", ""));
+// 页签记忆：iframe 重建/刷新后恢复（hash 会随 iframe src 重置，故用 sessionStorage）
+const TAB_KEYS = TABS.map((t) => t.key);
+function savedTab(): string {
+  try {
+    const v = sessionStorage.getItem("moe_console_tab");
+    return v && TAB_KEYS.includes(v) ? v : "stats";
+  } catch {
+    return "stats";
+  }
+}
+const hash = ref(savedTab());
+try {
+  sessionStorage.setItem("moe_console_tab", hash.value);
+} catch {
+  /* 隐私模式等场景忽略 */
+}
 window.addEventListener("hashchange", () => {
-  hash.value = (location.hash || "#stats").replace("#", "");
+  hash.value = (location.hash || `#${savedTab()}`).replace("#", "");
 });
 watch(hash, (v) => {
+  try {
+    sessionStorage.setItem("moe_console_tab", v);
+  } catch {
+    /* ignore */
+  }
   location.hash = v;
 });
 const active = computed(() => TABS.find((t) => t.key === hash.value) ?? TABS[0]);

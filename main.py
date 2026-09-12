@@ -55,6 +55,7 @@ class MoeMusicPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config  # AstrBotConfig 原始配置（WebUI 配置页读写用）
         self.cfg = PluginConfig.from_astrbot_config(config)
         self.api = MusicApiClient(
             base_url=self.cfg.api_base_url,
