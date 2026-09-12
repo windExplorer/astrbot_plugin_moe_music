@@ -221,24 +221,30 @@ class MoeWebUIApi:
         )
         return json_response({"plays": plays, "searches": searches})
 
+    async def _tasks_snapshot(self, limit: int = 10) -> dict:
+        """SSE 快照：字段必须与前端表格列一致（缺列会渲染成 undefined）。"""
+        plays = await self.store.query(
+            "SELECT id, created_at, user_name, user_id, group_name, group_id, "
+            "track_name, singer, source, quality, send_mode, selection_type, "
+            "trigger_type, queue_wait_ms, total_ms FROM play_records "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        searches = await self.store.query(
+            "SELECT id, created_at, user_name, user_id, group_name, keyword, "
+            "result_count, success, error_code, duration_ms, queue_wait_ms "
+            "FROM search_records ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return {"queue": self.plugin.queue.snapshot(), "plays": plays, "searches": searches}
+
     async def tasks_stream(self):
         """SSE：每 2 秒推送队列快照与最近记录（实时任务页订阅）。"""
 
         async def events():
             try:
                 while True:
-                    plays = await self.store.query(
-                        "SELECT id, created_at, user_name, group_name, track_name, "
-                        "quality, send_mode, total_ms FROM play_records ORDER BY id DESC LIMIT 10"
-                    )
-                    searches = await self.store.query(
-                        "SELECT id, created_at, user_name, keyword, result_count, success, "
-                        "duration_ms FROM search_records ORDER BY id DESC LIMIT 10"
-                    )
-                    payload = json.dumps(
-                        {"queue": self.plugin.queue.snapshot(), "plays": plays, "searches": searches},
-                        ensure_ascii=False,
-                    )
+                    payload = json.dumps(await self._tasks_snapshot(10), ensure_ascii=False)
                     yield f"data: {payload}\n\n"
                     await asyncio.sleep(2)
             except asyncio.CancelledError:  # 页面关闭断开

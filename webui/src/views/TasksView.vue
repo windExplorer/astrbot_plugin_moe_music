@@ -87,7 +87,7 @@ const playColumns = [
     title: "歌曲",
     key: "track_name",
     ellipsis: { tooltip: true },
-    render: (row: any) => `${row.track_name} - ${row.singer}`,
+    render: (row: any) => (row.singer ? `${row.track_name} - ${row.singer}` : row.track_name),
   },
   { title: "音源", key: "source", width: 70 },
   { title: "音质", key: "quality", width: 80 },

@@ -148,3 +148,22 @@ class TestConfig:
         stub_request_json({})
         kind, value, status = await api.save_config()
         assert kind == "error"
+
+
+class TestTasksSnapshot:
+    """SSE 快照字段完整性（v0.7.2 修复：缺列导致前端 undefined）。"""
+
+    async def test_snapshot_has_all_table_fields(self, tmp_path: Path):
+        api, store, _ = make_api(tmp_path)
+        await seed(store)
+        snap = await api._tasks_snapshot(10)
+        play = snap["plays"][0]
+        # 前端 TasksView 歌曲列/音源/方式/来源/排队列所需字段一个不能缺
+        for key in (
+            "track_name", "singer", "source", "quality", "send_mode",
+            "trigger_type", "queue_wait_ms", "total_ms", "group_name", "created_at",
+        ):
+            assert key in play, f"SSE 快照缺字段：{key}"
+        assert play["singer"] == "周杰伦"
+        assert snap["searches"][0]["queue_wait_ms"] == 10
+        assert "concurrency" in snap["queue"]
