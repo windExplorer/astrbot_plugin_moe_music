@@ -78,12 +78,39 @@ def collect_files() -> list[Path]:
     return sorted(files, key=lambda p: p.relative_to(PLUGIN_ROOT).as_posix())
 
 
+def ensure_webui_build(version: str) -> None:
+    """前端产物包含构建时注入的版本号——与 metadata 不一致即为过期，自动重建。
+
+    需要 Node.js；不可用时给出警告并继续打包（产物可能显示旧版本号）。
+    """
+    pages_dir = PLUGIN_ROOT / "pages" / "moe-console"
+    js_files = sorted((pages_dir / "assets").glob("index-*.js")) if pages_dir.exists() else []
+    if js_files and version in js_files[-1].read_text(encoding="utf-8", errors="ignore"):
+        return  # 产物已是当前版本
+
+    build_script = PLUGIN_ROOT / "webui" / "build.mjs"
+    if not build_script.exists():
+        print("警告：找不到 webui/build.mjs，跳过前端构建（产物可能过期）")
+        return
+    print("==> 前端产物缺失或版本过期，自动构建（需要 Node.js）...")
+    import subprocess
+
+    try:
+        result = subprocess.run(["node", str(build_script)], cwd=str(PLUGIN_ROOT))
+        if result.returncode != 0:
+            print("警告：前端构建失败，继续打包（产物可能过期）")
+    except FileNotFoundError:
+        print("警告：未找到 Node.js，无法自动构建前端；产物可能显示旧版本号，请手动执行 node webui/build.mjs")
+
+
 def main() -> int:
     name, version = read_metadata()
 
     missing = [f for f in REQUIRED_FILES if not (PLUGIN_ROOT / f).exists()]
     if missing:
         raise SystemExit(f"缺少运行必需文件：{missing}")
+
+    ensure_webui_build(version.lstrip("v"))
 
     dist_dir = PLUGIN_ROOT / "dist"
     dist_dir.mkdir(exist_ok=True)

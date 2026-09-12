@@ -193,7 +193,7 @@ class RecordStore:
         logger.info(f"[萌音点歌] 记录库已就绪：{self.db_path}")
 
     def _migrate(self) -> None:
-        """为旧版本库补齐新增列（幂等）。"""
+        """为旧版本库补齐新增列并回填时间戳（幂等）。"""
         migrated = 0
         for table, expected in _TABLE_COLUMNS.items():
             cur = self._conn.execute(f"PRAGMA table_info({table})")
@@ -205,6 +205,23 @@ class RecordStore:
                 migrated += 1
         if migrated:
             logger.info(f"[萌音点歌] 记录库已迁移：新增 {migrated} 列")
+        self._backfill_ts()
+
+    def _backfill_ts(self) -> None:
+        """旧记录（迁移补列产生）的 ts 为 NULL，会被所有统计查询过滤掉——
+        按 created_at（本地时间 ISO 文本）回填 unix 时间戳。"""
+        for table in ("search_records", "play_records"):
+            rows = self._conn.execute(
+                f"SELECT id, created_at FROM {table} WHERE ts IS NULL"
+            ).fetchall()
+            for rid, created_at in rows:
+                try:
+                    ts = datetime.fromisoformat(created_at).timestamp()
+                except (ValueError, TypeError):
+                    continue
+                self._conn.execute(f"UPDATE {table} SET ts = ? WHERE id = ?", (ts, rid))
+            if rows:
+                logger.info(f"[萌音点歌] 已回填 {table} 的 {len(rows)} 条旧记录时间戳")
 
     @staticmethod
     def _filter_fields(fields: dict, allowed: set[str]) -> dict:

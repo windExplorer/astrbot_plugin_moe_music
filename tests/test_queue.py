@@ -160,3 +160,55 @@ class TestTimingFields:
         n = store._conn.execute("SELECT COUNT(*) FROM play_records").fetchone()[0]
         assert n == 2
         await store.close()
+
+
+class TestTsBackfill:
+    """旧记录 ts 回填（v0.10.2）：迁移补列后 ts 为 NULL 的旧行会被统计过滤。"""
+
+    def test_backfill_from_created_at(self, tmp_path: Path):
+        db_path = tmp_path / "old.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE play_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "created_at TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute("INSERT INTO play_records (created_at, user_id) VALUES ('2026-09-01T10:30:00', 'u1')")
+        conn.commit()
+        conn.close()
+
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(db_path)
+        row = store._conn.execute("SELECT ts FROM play_records WHERE id = 1").fetchone()
+        assert row[0] is not None
+        # 回填的时间戳与 created_at 解析一致（本地时区）
+        assert abs(row[0] - time.mktime(time.strptime("2026-09-01T10:30:00", "%Y-%m-%dT%H:%M:%S"))) < 1
+        # 统计查询（ts 过滤）能看到旧记录
+        rows = store._conn.execute(
+            "SELECT COUNT(*) FROM play_records WHERE ts >= 0"
+        ).fetchone()
+        assert rows[0] == 1
+        # 幂等：再次打开不重复回填也不报错
+        store2 = RecordStore(db_path)
+        n = store2._conn.execute("SELECT COUNT(*) FROM play_records WHERE ts IS NULL").fetchone()[0]
+        assert n == 0
+        store.close()
+        store2.close()
+
+    def test_invalid_created_at_skipped(self, tmp_path: Path):
+        db_path = tmp_path / "bad.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE search_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "created_at TEXT NOT NULL, keyword TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute("INSERT INTO search_records (created_at, keyword) VALUES ('not-a-date', 'x')")
+        conn.commit()
+        conn.close()
+
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(db_path)  # 不应抛异常
+        row = store._conn.execute("SELECT ts FROM search_records").fetchone()
+        assert row[0] is None  # 无法解析的保持 NULL
+        store.close()
