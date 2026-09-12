@@ -105,3 +105,27 @@ class TestBlacklist:
     def test_deny_hints(self):
         assert "本群" in AccessController.deny_hint("group_blacklisted")
         assert "您" in AccessController.deny_hint("user_not_whitelisted")
+
+
+class TestListConfigTolerance:
+    """名单配置为字符串（历史遗留配置或手工填写）时不能被逐字符拆开。"""
+
+    def test_comma_separated_whitelist(self):
+        ctl = make_controller({"whitelist_groups": "20001,20002"})
+        assert ctl.mode == "whitelist"
+        assert ctl.check(FakeEvent(group_id="20002"))[0]
+        allowed, kind = ctl.check(FakeEvent(group_id="30003"))
+        assert not allowed
+        assert kind == "group_not_whitelisted"
+
+    def test_space_separated_blacklist(self):
+        ctl = make_controller({"blacklist_users": "10001 10002"})
+        allowed, kind = ctl.check(FakeEvent(user_id="10002"))
+        assert not allowed
+        assert kind == "user_blacklisted"
+
+    def test_single_id_string_does_not_leak_single_chars(self):
+        # 逐字符拆开会得到 {"2","0","1"}，群 2 / 群 1 被误伤成黑名单
+        ctl = make_controller({"blacklist_groups": "20001"})
+        assert ctl.check(FakeEvent(group_id="2"))[0]
+        assert ctl.check(FakeEvent(group_id="1"))[0]

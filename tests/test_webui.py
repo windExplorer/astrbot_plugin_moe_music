@@ -183,6 +183,26 @@ class TestConfig:
 
         assert warn_schema_keys_not_editable() == []
 
+    async def test_save_config_normalizes_list_strings(self, tmp_path: Path):
+        """名单类配置传字符串也要落库为列表：否则读取端逐字符拆开，白/黑名单失效。"""
+        api, _, plugin = make_api(tmp_path)
+        stub_request_json({"whitelist_groups": "20001,20002", "blacklist_users": "10001 10002"})
+        _, res, _ = await api.save_config()
+        assert res["saved"] is True
+        assert plugin.applied["whitelist_groups"] == ["20001", "20002"]
+        assert plugin.applied["blacklist_users"] == ["10001", "10002"]
+
+    async def test_save_config_keeps_option_lists_untouched(self, tmp_path: Path):
+        """带 options 的 list（send_modes）与其他类型保持原样，不做名单式切分。"""
+        api, _, plugin = make_api(tmp_path)
+        stub_request_json(
+            {"send_modes": ["card(音乐卡片)", "text(文本链接)"], "recall_candidate": False}
+        )
+        _, res, _ = await api.save_config()
+        assert res["saved"] is True
+        assert plugin.applied["send_modes"] == ["card(音乐卡片)", "text(文本链接)"]
+        assert plugin.applied["recall_candidate"] is False
+
     async def test_save_config_rejects_empty(self, tmp_path: Path):
         api, _, _ = make_api(tmp_path)
         stub_request_json({})

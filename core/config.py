@@ -59,6 +59,32 @@ def resolve_command_source(cmd: str, *, file_mode: bool = False) -> str:
     return COMMAND_SOURCE_ALIAS.get(base.lower(), "")
 
 
+# 名单类配置的分隔符：换行 / 逗号（半角与全角）/ 顿号 / 分号 / 空白
+_LIST_SEPARATORS = re.compile(r"[\s,，、;；]+")
+
+
+def parse_str_list(value) -> list[str]:
+    """名单类配置归一化为字符串列表（兼容列表与各种分隔符字符串）。
+
+    AstrBot 配置页、旧版 WebUI 与手工编辑的 config 都可能把「列表」存成字符串，
+    常见写法有 ``"123 456"``、``"123,456"``、``"123\\n456"``。直接 ``for v in value``
+    会**逐字符**遍历字符串（``"123456"`` → ``["1","2","3",...]``），名单看着填了却
+    一个都匹配不上——白/黑名单「填了不生效」多由此而来。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        chunks = [value]
+    elif isinstance(value, (list, tuple, set)):
+        chunks = [str(item) for item in value]
+    else:
+        chunks = [str(value)]
+    result: list[str] = []
+    for chunk in chunks:
+        result.extend(p.strip() for p in _LIST_SEPARATORS.split(chunk) if p.strip())
+    return result
+
+
 def _strip_option_label(option: str) -> str:
     """归一化配置面板选项：去掉括号说明，如 "all(聚合)" -> "all"、"card(音乐卡片)" -> "card"。"""
     return option.strip().split("(", 1)[0].strip().lower()
@@ -139,8 +165,8 @@ class PluginConfig:
             selection_display = "text"
 
         def _str_list(key: str) -> list[str]:
-            values = config.get(key, []) or []
-            return [str(v).strip() for v in values if str(v).strip()]
+            # 兼容历史遗留的字符串配置（逗号/空格/换行分隔），不再逐字符拆分
+            return parse_str_list(config.get(key))
 
         return cls(
             api_base_url=base_url,

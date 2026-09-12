@@ -3,6 +3,7 @@
 from astrbot_plugin_moe_music.core.config import (
     COMMAND_SOURCE_ALIAS,
     PluginConfig,
+    parse_str_list,
     resolve_command_source,
 )
 from astrbot_plugin_moe_music.main import FILE_COMMAND_ALIASES, SONG_COMMAND_ALIASES
@@ -83,6 +84,39 @@ class TestPluginConfig:
         masked = cfg.key_masked
         assert "abcdef1234567890" not in masked
         assert masked.startswith("sk-")
+
+    def test_access_lists_tolerate_string_values(self):
+        """名单被存成字符串时也要解析正确（历史配置/手工填写），否则等于名单失效。"""
+        cfg = PluginConfig.from_astrbot_config({"whitelist_groups": "20001,20002"})
+        assert cfg.whitelist_groups == ["20001", "20002"]
+
+
+class TestParseStrList:
+    """名单类配置解析：字符串必须按分隔符切分，不能逐字符遍历。"""
+
+    def test_empty_values(self):
+        assert parse_str_list(None) == []
+        assert parse_str_list([]) == []
+        assert parse_str_list("") == []
+        assert parse_str_list("   ") == []
+
+    def test_list_elements_trimmed(self):
+        assert parse_str_list(["10001", " 10002 "]) == ["10001", "10002"]
+
+    def test_plain_string_is_not_split_by_character(self):
+        # 逐字符遍历的症状：["1", "0", "0", "0", "1"] —— 名单看着填了却匹配不上
+        assert parse_str_list("10001") == ["10001"]
+
+    def test_supported_separators(self):
+        for raw in ("10001 10002", "10001,10002", "10001，10002", "10001、10002", "10001\n10002"):
+            assert parse_str_list(raw) == ["10001", "10002"], raw
+
+    def test_list_element_containing_multiple_ids(self):
+        # AstrBot 配置页可能把整串塞进列表的单个元素
+        assert parse_str_list(["10001,10002"]) == ["10001", "10002"]
+
+    def test_wildcard_kept(self):
+        assert parse_str_list(["200*", "*0001"]) == ["200*", "*0001"]
 
 
 class TestCommandAlias:

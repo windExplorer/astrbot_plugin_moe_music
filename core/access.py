@@ -13,6 +13,8 @@ import fnmatch
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .config import parse_str_list
+
 # 拒绝类型 -> 用户侧提示文案（不暴露命中了哪个名单等技术细节）
 DENY_HINTS = {
     "group_not_whitelisted": "本群暂未开放点歌功能哦～",
@@ -23,8 +25,12 @@ DENY_HINTS = {
 
 
 def _norm_list(values) -> set[str]:
-    """名单归一化：转字符串、去空白。"""
-    return {str(v).strip() for v in (values or []) if str(v).strip()}
+    """名单归一化：兼容列表与「逗号/空格/换行分隔的字符串」，去空白。
+
+    不能直接遍历：配置若被存成字符串，``"123456"`` 会被逐字符拆成
+    ``{"1","2",...}``，名单等于失效。
+    """
+    return set(parse_str_list(values))
 
 
 def _match_any(value: str, patterns: set[str]) -> bool:

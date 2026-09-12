@@ -21,6 +21,8 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request, stream_response
 
+from .core.config import parse_str_list
+
 PLUGIN_NAME = "astrbot_plugin_moe_music"
 
 # 当前活跃的插件实例（register_web_api 更新）。插件重载后旧路由经此转发到新实例。
@@ -351,7 +353,7 @@ class MoeWebUIApi:
         payload = await request.json(default={})
         if not isinstance(payload, dict) or not payload:
             return error_response("请求体为空")
-        clean = {k: v for k, v in payload.items() if k in _EDITABLE_KEYS}
+        clean = _normalize_payload({k: v for k, v in payload.items() if k in _EDITABLE_KEYS})
         if not clean:
             return error_response("没有可保存的配置项")
         try:
@@ -362,14 +364,37 @@ class MoeWebUIApi:
         return json_response({"saved": True, "applied": sorted(clean)})
 
 
-def _schema_top_keys() -> set[str]:
-    """读取 _conf_schema.json 的顶层配置键。"""
+def _schema_specs() -> dict:
+    """读取 _conf_schema.json（配置键 -> 该配置项的声明）。"""
     try:
         path = Path(__file__).parent / "_conf_schema.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        return set(data.keys()) if isinstance(data, dict) else set()
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return set()
+        return {}
+
+
+def _schema_top_keys() -> set[str]:
+    """配置 schema 的全部顶层键。"""
+    return set(_schema_specs())
+
+
+def _normalize_payload(payload: dict) -> dict:
+    """按 schema 声明规范化待保存的值。
+
+    名单类（``type == "list"`` 且无 options）一律归一为字符串列表：前端文本域、
+    AstrBot 配置页或直接调用接口传字符串时，若不规范化就会把 ``"123456"`` 原样
+    落库，读取端再按字符逐个拆开，名单等于失效。
+    """
+    specs = _schema_specs()
+    normalized: dict = {}
+    for key, value in payload.items():
+        spec = specs.get(key) or {}
+        if spec.get("type") == "list" and not spec.get("options"):
+            normalized[key] = parse_str_list(value)
+        else:
+            normalized[key] = value
+    return normalized
 
 
 def warn_schema_keys_not_editable() -> list[str]:

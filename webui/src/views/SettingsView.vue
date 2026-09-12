@@ -45,8 +45,29 @@ const GROUPS: Array<{ title: string; keys: string[] }> = [
   { title: "其他", keys: ["enable_self_test"] },
 ];
 
-// 一行一个的列表配置（textarea 渲染）
-const LIST_TEXTAREA_KEYS = ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"];
+/** 名单类配置：schema 里的 list 且无 options —— 用多行文本域，一行一个。 */
+function isLineList(item: any): boolean {
+  return item?.type === "list" && !item.options;
+}
+
+/** 文本 -> 名单数组：按换行 / 逗号 / 顿号 / 空格切分并去空（粘贴格式容错）。 */
+function splitList(text: string): string[] {
+  return text
+    .split(/[\s,，、;；]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** 配置值 -> 文本域内容（兼容数组与历史遗留的逗号分隔字符串）。 */
+function toLines(value: any): string {
+  if (Array.isArray(value)) return value.join("\n");
+  if (typeof value === "string") return splitList(value).join("\n");
+  return "";
+}
+
+function setLines(key: string, text: string) {
+  values.value[key] = splitList(text);
+}
 
 onMounted(load);
 
@@ -106,21 +127,23 @@ async function save() {
                 <n-form-item :label="schema[key].description">
                   <template v-if="(schema[key].type === 'string' || schema[key].type === 'text') && !schema[key].options">
                     <n-input
-                      v-if="LIST_TEXTAREA_KEYS.includes(key)"
+                      v-if="schema[key].type === 'text'"
                       type="textarea"
-                      :rows="4"
-                      :value="(values[key] || []).join('\n')"
-                      placeholder="一行一个，支持 * 通配；留空表示不启用"
-                      @update:value="
-                        (v: string) =>
-                          (values[key] = v
-                            .split('\n')
-                            .map((s: string) => s.trim())
-                            .filter(Boolean))
-                      "
+                      :rows="3"
+                      v-model:value="values[key]"
+                      :placeholder="schema[key].hint || ''"
                     />
                     <n-input v-else v-model:value="values[key]" :placeholder="schema[key].hint || ''" />
                   </template>
+                  <!-- 名单类（list 且无 options）：多行文本域，一行一个；粘贴逗号/空格分隔也能识别 -->
+                  <n-input
+                    v-else-if="isLineList(schema[key])"
+                    type="textarea"
+                    :rows="4"
+                    :value="toLines(values[key])"
+                    placeholder="一行一个（也支持逗号或空格分隔），支持 * 通配；留空表示不启用"
+                    @update:value="(v: string) => setLines(key, v)"
+                  />
                   <n-select
                     v-else-if="schema[key].type === 'string' && schema[key].options"
                     v-model:value="values[key]"
@@ -160,6 +183,7 @@ async function save() {
                   <n-input v-else v-model:value="values[key]" />
                 </n-form-item>
                 <div v-if="schema[key].hint" style="margin: -12px 0 8px; font-size: 12px; opacity: 0.55; line-height: 1.5">
+                  <span v-if="isLineList(schema[key])">当前 {{ (values[key] || []).length }} 项 · </span>
                   {{ schema[key].hint }}
                 </div>
               </n-grid-item>
