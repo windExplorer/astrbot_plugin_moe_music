@@ -30,6 +30,7 @@ class MockEvent:
         self._sender_id = sender_id
         self._group_id = group_id
         self._group_name = group_name
+        self._platform_name = "aiocqhttp"
         self._is_admin = is_admin
         self._private = private
 
@@ -52,7 +53,7 @@ class MockEvent:
         return "测试用户"
 
     def get_platform_name(self):
-        return "aiocqhttp"
+        return self._platform_name
 
     def get_group_id(self):
         return self._group_id
@@ -594,11 +595,20 @@ class TestPickerRejection:
             assert hints, "应提示还有一单点歌进行中"
 
 
-class _AiocqMockEvent(MockEvent):
-    """带 OneBot bot 的 mock 事件：记录 call_action 调用与返回 message_id。"""
+_AiocqStub = sys.modules[
+    "astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event"
+].AiocqhttpMessageEvent
+
+
+class _AiocqMockEvent(MockEvent, _AiocqStub):
+    """带 OneBot bot 的 mock 事件：继承 stub 的 aiocqhttp 事件类以通过 isinstance 判断。
+
+    platform_name 故意设为自定义值（"napcat"），验证不再依赖平台名字符串。
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._platform_name = "napcat"  # 用户自定义的平台名
         self.actions: list[tuple] = []
 
         class Api:

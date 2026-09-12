@@ -13,6 +13,9 @@ import traceback
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Image
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
 from astrbot.core.utils.session_waiter import (
     SessionController,
     SessionFilter,
@@ -305,8 +308,12 @@ class MoeMusicService:
 
     @staticmethod
     def _is_aiocqhttp(event: AstrMessageEvent) -> bool:
-        """是否为 OneBot 平台且具备 bot 客户端（可 call_action）。"""
-        return event.get_platform_name() == "aiocqhttp" and getattr(event, "bot", None) is not None
+        """是否为 OneBot(aiocqhttp) 平台且具备 bot 客户端（可 call_action）。
+
+        注意不能用 get_platform_name() == "aiocqhttp" 判断：那返回的是用户在
+        平台配置里自定义的名称（可能是 napcat / qq 等），与适配器类型无关。
+        """
+        return isinstance(event, AiocqhttpMessageEvent) and getattr(event, "bot", None) is not None
 
     async def _send_onebot_message(self, event: AstrMessageEvent, message: list[dict]) -> int | None:
         """经 OneBot 直接发送消息段，返回 message_id；失败返回 None（调用方降级通用发送）。"""
@@ -326,14 +333,16 @@ class MoeMusicService:
             return None
 
     async def _recall_message(self, event: AstrMessageEvent, message_id: int | None) -> None:
-        """撤回候选列表消息（仅 aiocqhttp）；失败静默（可能已被手动删除或权限不足）。"""
+        """撤回候选列表消息（仅 aiocqhttp）；失败记 warning（可能权限不足或消息已删）。"""
         if not message_id or not self.cfg.recall_candidate or not self._is_aiocqhttp(event):
             return
         try:
             await event.bot.api.call_action("delete_msg", message_id=message_id)
             logger.debug(f"[萌音点歌] 已撤回候选列表消息：{message_id}")
         except Exception as e:
-            logger.debug(f"[萌音点歌] 撤回候选列表失败（忽略）：{type(e).__name__}: {e}")
+            logger.warning(
+                f"[萌音点歌] 撤回候选列表失败（消息可能已被删除或协议端不支持）：{type(e).__name__}: {e}"
+            )
 
     async def _render_candidate_image(self, keyword: str, tracks: list[Track]) -> bytes:
         """并行下载候选封面后渲染图片菜单。"""

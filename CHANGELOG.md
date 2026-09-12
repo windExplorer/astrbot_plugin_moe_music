@@ -2,6 +2,12 @@
 
 本文件记录 astrbot_plugin_moe_music 的版本变更，最新版本在最上方。
 
+## v0.10.1 - 2026-09-12
+
+### 修复
+
+- 自动撤回候选列表不生效：平台判断误用了 `get_platform_name() == "aiocqhttp"`，而该值是用户在平台配置里自定义的名称（如 napcat / qq），导致恒不匹配、候选列表静默走普通发送且无任何日志。现改为按事件类型（isinstance AiocqhttpMessageEvent）判断，与音乐卡片逻辑一致；撤回失败日志从 debug 提升为 warning 便于排查。
+
 ## v0.10.0 - 2026-09-12
 
 ### 新增
