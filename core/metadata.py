@@ -61,7 +61,9 @@ def _embed_flac(
     audio["artist"] = artist
     audio["album"] = album
     if lyrics:
-        audio["lyrics"] = lyrics
+        # 键名用大写 LYRICS：Vorbis Comment 规范推荐全大写，部分播放器/工具只按大写查找
+        # （后端下载链路同样写 LYRICS，保持两边一致）。
+        audio["LYRICS"] = lyrics
     if cover:
         pic = Picture()
         pic.type = 3  # front cover

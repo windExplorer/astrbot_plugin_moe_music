@@ -95,7 +95,8 @@ class TestEmbedFlac:
         audio = FLAC(str(p))
         assert audio["title"] == ["晴天"]
         assert audio["artist"] == ["周杰伦"]
-        assert audio["lyrics"] == [LYRICS]
+        # 大写 LYRICS：与 Vorbis Comment 规范及后端下载链路保持一致
+        assert audio["LYRICS"] == [LYRICS]
         pics = audio.pictures
         assert len(pics) == 1
         assert pics[0].mime == "image/png"
