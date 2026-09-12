@@ -6,7 +6,7 @@ import { apiGet } from "../bridge";
 import Chart from "../components/Chart.vue";
 
 const msg = useMessage();
-const range = ref("7d");
+const range = ref("24h");
 const loading = ref(false);
 const overview = ref<Record<string, any> | null>(null);
 const trend = ref<{ bucket: string; dates: string[]; search: number[]; play: number[] } | null>(null);
@@ -14,8 +14,8 @@ const top = ref<{ users: any[]; groups: any[]; tracks: any[] } | null>(null);
 const dist = ref<Record<string, any> | null>(null);
 
 const rangeOptions = [
-  { label: "今天（按小时）", value: "today" },
   { label: "近一天（按小时）", value: "24h" },
+  { label: "今天（按小时）", value: "today" },
   { label: "近三天", value: "3d" },
   { label: "近一周", value: "7d" },
   { label: "近 14 天", value: "14d" },

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /** 实时任务页：队列状态 + 最近点歌/搜索记录（SSE 实时，断线自动轮询兜底）。 */
 import { h, onBeforeUnmount, onMounted, ref } from "vue";
-import { NButton, NCard, NDataTable, NSwitch, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NDataTable, NEmpty, NSwitch, NTag, useMessage } from "naive-ui";
 import { apiGet, subscribeSSE } from "../bridge";
 
 const msg = useMessage();
 const live = ref(true);
 const queue = ref<Record<string, any> | null>(null);
+const db = ref<Record<string, any> | null>(null);
 const plays = ref<any[]>([]);
 const searches = ref<any[]>([]);
 let unsub: (() => void) | null = null;
@@ -16,6 +17,7 @@ async function fetchOnce() {
   try {
     const [q, r] = await Promise.all([apiGet<any>("tasks/queue"), apiGet<any>("tasks/recent", { limit: 20 })]);
     queue.value = q.queue;
+    db.value = q.db ?? null;
     plays.value = r.plays ?? [];
     searches.value = r.searches ?? [];
   } catch {
@@ -26,6 +28,7 @@ async function fetchOnce() {
 function applySnapshot(s: any) {
   if (!s) return;
   queue.value = s.queue;
+  if (s.db) db.value = s.db;
   if (s.plays) plays.value = s.plays;
   if (s.searches) searches.value = s.searches;
 }
@@ -175,11 +178,33 @@ const searchColumns = [
     </n-card>
 
     <n-card title="最近点歌" size="small" style="margin-bottom: 12px">
-      <n-data-table :columns="playColumns" :data="plays" size="small" :bordered="false" :bottom-bordered="false" />
+      <n-data-table
+        v-if="plays.length"
+        :columns="playColumns"
+        :data="plays"
+        size="small"
+        :bordered="false"
+        :bottom-bordered="false"
+      />
+      <n-empty v-else description="还没有点歌记录">
+        <template #extra>
+          <div style="font-size: 12px; opacity: 0.6">
+            记录库（{{ db?.play_total ?? 0 }} 条点歌 / {{ db?.search_total ?? 0 }} 条搜索）：<br />{{ db?.path ?? "-" }}
+          </div>
+        </template>
+      </n-empty>
     </n-card>
 
     <n-card title="最近搜索" size="small">
-      <n-data-table :columns="searchColumns" :data="searches" size="small" :bordered="false" :bottom-bordered="false" />
+      <n-data-table
+        v-if="searches.length"
+        :columns="searchColumns"
+        :data="searches"
+        size="small"
+        :bordered="false"
+        :bottom-bordered="false"
+      />
+      <n-empty v-else description="还没有搜索记录（在 QQ 里点一首歌试试）" />
     </n-card>
   </div>
 </template>

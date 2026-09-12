@@ -545,6 +545,7 @@ class MoeMusicService:
             try:
                 search_n, play_n = await self.store.counts()
                 lines.append(f"已累计记录：搜索 {search_n} 次 / 点歌 {play_n} 首")
+                lines.append(f"记录库：{self.store.db_path}")
             except Exception:
                 pass
         if self.queue:

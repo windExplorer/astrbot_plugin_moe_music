@@ -133,6 +133,8 @@ class TestTasks:
         assert kind == "json"
         assert value["queue"]["concurrency"] == 2
         assert value["queue"]["pending"] == 0
+        assert value["db"]["play_total"] == 0  # 库状态透出（诊断数据为空问题）
+        assert "records.db" in value["db"]["path"]
 
     async def test_recent(self, tmp_path: Path):
         api, store, _ = make_api(tmp_path)

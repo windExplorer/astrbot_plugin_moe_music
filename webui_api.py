@@ -147,6 +147,7 @@ class MoeWebUIApi:
             {
                 "range": range_key,
                 "range_label": _RANGE_DEFS[range_key][0],
+                "db_path": str(self.plugin.store.db_path),
                 "search_total": int(s.get("n") or 0),
                 "search_ok": int(s.get("ok") or 0),
                 "search_avg_ms": round(float(s.get("avg_ms") or 0)),
@@ -259,7 +260,17 @@ class MoeWebUIApi:
     # ============ 实时任务 ============
 
     async def tasks_queue(self):
-        return json_response({"queue": self.plugin.queue.snapshot()})
+        counts = await self.store.counts()
+        return json_response(
+            {
+                "queue": self.plugin.queue.snapshot(),
+                "db": {
+                    "path": str(self.plugin.store.db_path),
+                    "search_total": counts[0],
+                    "play_total": counts[1],
+                },
+            }
+        )
 
     async def tasks_recent(self):
         limit = _q_int("limit", 20, 1, 100)
