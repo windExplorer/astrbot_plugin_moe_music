@@ -212,3 +212,29 @@ class TestTsBackfill:
         row = store._conn.execute("SELECT ts FROM search_records").fetchone()
         assert row[0] is None  # 无法解析的保持 NULL
         store.close()
+
+
+class TestConnSelfHeal:
+    """连接自愈（v0.10.4）：terminate 关库后旧引用访问自动重连（插件重载场景）。"""
+
+    def test_query_after_close_reconnects(self, tmp_path: Path):
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(tmp_path / "records.db")
+        asyncio.run(store.add_play_record(user_id="u1", track_id="wy:1"))
+        # 模拟插件重载：连接被关闭
+        store._conn.close()
+        store._conn = None
+        # 旧引用再查询：应自动重连并返回数据（而非 "closed database"）
+        got = asyncio.run(store.query("SELECT user_id FROM play_records"))
+        assert got == [{"user_id": "u1"}]
+
+    def test_write_after_close_reconnects(self, tmp_path: Path):
+        from astrbot_plugin_moe_music.core.storage import RecordStore
+
+        store = RecordStore(tmp_path / "records.db")
+        store._conn.close()
+        store._conn = None
+        asyncio.run(store.add_play_record(user_id="u2"))
+        _, play_n = asyncio.run(store.counts())
+        assert play_n == 1

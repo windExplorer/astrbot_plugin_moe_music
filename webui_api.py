@@ -23,6 +23,9 @@ from astrbot.api.web import error_response, json_response, request, stream_respo
 
 PLUGIN_NAME = "astrbot_plugin_moe_music"
 
+# 当前活跃的插件实例（register_web_api 更新）。插件重载后旧路由经此转发到新实例。
+_active_plugin = None
+
 # 统计范围定义：key -> (显示名, 趋势分桶, 自然单位数)
 # bucket: hour=按整点小时 / day=按日期 / month=按月份
 _RANGE_DEFS = {
@@ -333,6 +336,14 @@ class MoeWebUIApi:
         raw = self.plugin.config
         return json_response({k: raw.get(k) for k in _EDITABLE_KEYS if k in raw})
 
+    async def get_changelog(self):
+        """更新日志（CHANGELOG.md 原文，前端渲染）。"""
+        path = Path(__file__).parent / "CHANGELOG.md"
+        try:
+            return json_response({"content": path.read_text(encoding="utf-8")})
+        except Exception as e:
+            return error_response(f"读取更新日志失败：{e}", status_code=500)
+
     async def save_config(self):
         payload = await request.json(default={})
         if not isinstance(payload, dict) or not payload:
@@ -399,37 +410,43 @@ def _month_buckets() -> tuple[list[str], list[str]]:
         d = (d - _dt.timedelta(days=1)).replace(day=1)
     return months[::-1], months[::-1]
 
-    async def get_changelog(self):
-        """更新日志（CHANGELOG.md 原文，前端渲染）。"""
-        path = Path(__file__).parent / "CHANGELOG.md"
-        try:
-            return json_response({"content": path.read_text(encoding="utf-8")})
-        except Exception as e:
-            return error_response(f"读取更新日志失败：{e}", status_code=500)
-
 
 def register_web_api(plugin) -> None:
-    """在插件 initialize 时调用：注册全部控制台路由（幂等安全）。"""
+    """在插件 initialize 时调用：注册全部控制台路由。
+
+    注册的是模块级稳定包装 handler，内部经 ``_active_plugin`` 转发到**当前活跃**
+    的插件实例——插件重载后即使旧路由短暂残留，请求也会落到新实例的记录库，
+    不会打到已被 terminate 关闭的旧连接上。
+    """
+    global _active_plugin
+    _active_plugin = plugin
     ctx = plugin.context
-    api = MoeWebUIApi(plugin)
     prefix = f"/{PLUGIN_NAME}"
     routes = [
-        (f"{prefix}/stats/overview", api.stats_overview, ["GET"], "点歌统计总览"),
-        (f"{prefix}/stats/trend", api.stats_trend, ["GET"], "点歌趋势"),
-        (f"{prefix}/stats/top", api.stats_top, ["GET"], "点歌排行"),
-        (f"{prefix}/stats/dist", api.stats_dist, ["GET"], "点歌分布"),
-        (f"{prefix}/tasks/queue", api.tasks_queue, ["GET"], "队列快照"),
-        (f"{prefix}/tasks/recent", api.tasks_recent, ["GET"], "最近记录"),
-        (f"{prefix}/tasks/stream", api.tasks_stream, ["GET"], "实时任务流（SSE）"),
-        (f"{prefix}/schema", api.get_schema, ["GET"], "读取配置 schema"),
-        (f"{prefix}/config", api.get_config, ["GET"], "读取插件配置"),
-        (f"{prefix}/config", api.save_config, ["POST"], "保存插件配置"),
-        (f"{prefix}/changelog", api.get_changelog, ["GET"], "更新日志"),
+        (f"{prefix}/stats/overview", "stats_overview", ["GET"], "点歌统计总览"),
+        (f"{prefix}/stats/trend", "stats_trend", ["GET"], "点歌趋势"),
+        (f"{prefix}/stats/top", "stats_top", ["GET"], "点歌排行"),
+        (f"{prefix}/stats/dist", "stats_dist", ["GET"], "点歌分布"),
+        (f"{prefix}/tasks/queue", "tasks_queue", ["GET"], "队列快照"),
+        (f"{prefix}/tasks/recent", "tasks_recent", ["GET"], "最近记录"),
+        (f"{prefix}/tasks/stream", "tasks_stream", ["GET"], "实时任务流（SSE）"),
+        (f"{prefix}/schema", "get_schema", ["GET"], "读取配置 schema"),
+        (f"{prefix}/config", "get_config", ["GET"], "读取插件配置"),
+        (f"{prefix}/config", "save_config", ["POST"], "保存插件配置"),
+        (f"{prefix}/changelog", "get_changelog", ["GET"], "更新日志"),
     ]
+
+    def _handler(name: str):
+        async def view(*args, **kwargs):
+            api = MoeWebUIApi(_active_plugin if _active_plugin is not None else plugin)
+            return await getattr(api, name)(*args, **kwargs)
+
+        return view
+
     registered = 0
-    for path, handler, methods, desc in routes:
+    for path, name, methods, desc in routes:
         try:
-            ctx.register_web_api(path, handler, methods, desc)
+            ctx.register_web_api(path, _handler(name), methods, desc)
             registered += 1
         except Exception as e:
             logger.warning(f"[萌音点歌] WebUI 路由注册失败 {path}: {e}")

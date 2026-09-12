@@ -181,6 +181,12 @@ class RecordStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
+        self._open()
+        logger.info(f"[萌音点歌] 记录库已就绪：{self.db_path}")
+
+    def _open(self) -> sqlite3.Connection:
+        """打开（或重开）连接并确保表结构就绪。"""
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -190,7 +196,22 @@ class RecordStore:
             self._migrate()  # 先补列（旧库），否则基于新列的索引会创建失败
             for stmt in _SEARCH_INDEXES + _PLAY_INDEXES:
                 self._conn.execute(stmt)
-        logger.info(f"[萌音点歌] 记录库已就绪：{self.db_path}")
+        return self._conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """获取可用连接。
+
+        插件重载后旧实例的 terminate 会关闭连接，而 WebUI 路由的旧 handler
+        可能仍持有本实例——此时自动重开同一库文件（数据同源，WAL 安全），
+        避免 "Cannot operate on a closed database" 导致查询全部返回空。
+        """
+        if self._conn is not None:
+            try:
+                self._conn.execute("SELECT 1")
+                return self._conn
+            except sqlite3.ProgrammingError:
+                logger.info("[萌音点歌] 记录库连接已关闭（插件重载），自动重连")
+        return self._open()
 
     def _migrate(self) -> None:
         """为旧版本库补齐新增列并回填时间戳（幂等）。"""
@@ -237,8 +258,9 @@ class RecordStore:
         data = self._filter_fields(fields, columns)
         keys = ", ".join(data)
         marks = ", ".join("?" for _ in data)
-        with self._lock, self._conn:
-            self._conn.execute(f"INSERT INTO {table} ({keys}) VALUES ({marks})", tuple(data.values()))
+        conn = self._get_conn()
+        with self._lock, conn:
+            conn.execute(f"INSERT INTO {table} ({keys}) VALUES ({marks})", tuple(data.values()))
 
     async def add_search_record(self, **fields) -> None:
         """记录一次搜索（成功/失败都记）。失败不影响点歌流程。"""
@@ -258,7 +280,8 @@ class RecordStore:
         """两表行数（自检/诊断用）。"""
 
         def _q():
-            cur = self._conn.cursor()
+            conn = self._get_conn()
+            cur = conn.cursor()
             cur.execute("SELECT (SELECT COUNT(*) FROM search_records), (SELECT COUNT(*) FROM play_records)")
             return cur.fetchone()
 
@@ -268,12 +291,13 @@ class RecordStore:
         """只读查询（WebUI 统计用），返回 dict 行列表。失败返回空列表。"""
 
         def _q():
-            self._conn.row_factory = sqlite3.Row
+            conn = self._get_conn()
+            conn.row_factory = sqlite3.Row
             try:
-                rows = self._conn.execute(sql, params).fetchall()
+                rows = conn.execute(sql, params).fetchall()
                 return [dict(r) for r in rows]
             finally:
-                self._conn.row_factory = None
+                conn.row_factory = None
 
         try:
             return await asyncio.to_thread(_q)
@@ -282,7 +306,16 @@ class RecordStore:
             return []
 
     async def close(self) -> None:
+        """关闭连接（terminate 用）。若之后仍被访问（旧路由残留），_get_conn 会自动重连。"""
+        def _close():
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+
         try:
-            await asyncio.to_thread(self._conn.close)
+            await asyncio.to_thread(_close)
         except Exception:
             pass
