@@ -22,14 +22,30 @@ const saving = ref(false);
 const schema = ref<Record<string, any>>({});
 const values = ref<Record<string, any>>({});
 
-// 表单分组顺序与标题
+// 表单分组顺序与标题（新增配置项必须加入对应组才会渲染）
 const GROUPS: Array<{ title: string; keys: string[] }> = [
   { title: "音乐服务", keys: ["api_base_url", "api_key", "public_base_url", "proxy", "request_timeout"] },
-  { title: "点歌行为", keys: ["default_source", "default_quality", "song_limit", "selection_display", "send_modes", "timeout", "enable_lyrics", "embed_metadata"] },
+  {
+    title: "点歌行为",
+    keys: [
+      "default_source",
+      "default_quality",
+      "song_limit",
+      "selection_display",
+      "send_modes",
+      "timeout",
+      "enable_lyrics",
+      "embed_metadata",
+      "recall_candidate",
+    ],
+  },
   { title: "队列", keys: ["queue_concurrency", "queue_max_pending"] },
   { title: "访问控制（白/黑名单，白名单优先）", keys: ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"] },
   { title: "其他", keys: ["enable_self_test"] },
 ];
+
+// 一行一个的列表配置（textarea 渲染）
+const LIST_TEXTAREA_KEYS = ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"];
 
 onMounted(load);
 
@@ -89,10 +105,18 @@ async function save() {
                 <n-form-item :label="schema[key].description">
                   <template v-if="(schema[key].type === 'string' || schema[key].type === 'text') && !schema[key].options">
                     <n-input
-                      v-if="key === 'send_modes' || key.startsWith('whitelist') || key.startsWith('blacklist')"
-                      :value="(values[key] || []).join(',')"
-                      placeholder="逗号分隔"
-                      @update:value="(v: string) => (values[key] = v.split(',').map((s: string) => s.trim()).filter(Boolean))"
+                      v-if="LIST_TEXTAREA_KEYS.includes(key)"
+                      type="textarea"
+                      :rows="4"
+                      :value="(values[key] || []).join('\n')"
+                      placeholder="一行一个，支持 * 通配；留空表示不启用"
+                      @update:value="
+                        (v: string) =>
+                          (values[key] = v
+                            .split('\n')
+                            .map((s: string) => s.trim())
+                            .filter(Boolean))
+                      "
                     />
                     <n-input v-else v-model:value="values[key]" :placeholder="schema[key].hint || ''" />
                   </template>

@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS play_records (
     download_ms     INTEGER,                     -- 音频下载耗时（毫秒，本地模式）
     embed_ms        INTEGER,                     -- 元数据嵌入耗时（毫秒）
     send_ms         INTEGER,                     -- 发送消息动作耗时（毫秒）
-    total_ms        INTEGER                      -- 全流程耗时（入队 → 发送完成，毫秒）
+    process_ms      INTEGER,                     -- 接口纯处理耗时（不含排队与等待用户选号）
+    total_ms        INTEGER                      -- 端到端总耗时（含排队与等待用户选号）
 );
 """
 
@@ -157,6 +158,7 @@ _PLAY_COLUMNS = {
     "download_ms",
     "embed_ms",
     "send_ms",
+    "process_ms",
     "total_ms",
 }
 

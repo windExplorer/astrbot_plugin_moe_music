@@ -159,7 +159,7 @@ class MoeMusicService:
                         **ctx,
                     )
                 await event.send(event.plain_result(e.user_hint))
-                return None
+                return None, duration_ms
             if tracks or attempt == 2:
                 break
             # 空结果：可能命中后端音源冷却窗口，间隔后重试一次
@@ -178,7 +178,7 @@ class MoeMusicService:
                 queue_wait_ms=queue_wait_ms,
                 **ctx,
             )
-        return tracks
+        return tracks, duration_ms
 
     # ============ 点歌 ============
 
@@ -195,6 +195,7 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return
 
+        flow_start = time.monotonic()  # 端到端计时起点（含等待用户选号）
         record_base = {"trigger_type": "command", "command": command, "keyword": keyword, **ctx}
 
         # 搜索任务入队（排队耗时记入 search_records.queue_wait_ms）
@@ -204,10 +205,11 @@ class MoeMusicService:
             )
 
         try:
-            tracks = await self._run_task(_search_job)
+            tracks, search_ms = await self._run_task(_search_job)
         except asyncio.QueueFull:
             await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
             return
+        record_base["search_ms"] = search_ms  # 搜索接口实际耗时（不计等待用户）
 
         if not tracks:
             if tracks is not None:
@@ -221,6 +223,7 @@ class MoeMusicService:
                 event,
                 tracks[index_hint - 1],
                 record_ctx={**record_base, "selected_index": index_hint, "selection_type": "direct_index"},
+                flow_start=flow_start,
             )
             return
 
@@ -233,18 +236,25 @@ class MoeMusicService:
         # 单曲直发
         if len(tracks) == 1:
             await self._send_via_queue(
-                event, tracks[0], record_ctx={**record_base, "selected_index": 1, "selection_type": "single"}
+                event,
+                tracks[0],
+                record_ctx={**record_base, "selected_index": 1, "selection_type": "single"},
+                flow_start=flow_start,
             )
             return
 
         candidate_id = await self._send_candidate_list(event, keyword, tracks)
         if warned:
             logger.debug(f"[萌音点歌] 命令序号超范围，已引导重新选择：{index_hint}")
-        await self._wait_for_selection(event, tracks, record_base, candidate_id)
+        await self._wait_for_selection(event, tracks, record_base, candidate_id, flow_start)
 
-    async def _send_via_queue(self, event, track: Track, record_ctx: dict) -> bool:
+    async def _send_via_queue(
+        self, event, track: Track, record_ctx: dict, flow_start: float | None = None
+    ) -> bool:
         """发送任务入队（排队耗时记入 play_records.queue_wait_ms）；队满时提示繁忙。"""
         timings: dict = {}
+        if flow_start is not None:
+            timings["_flow_start"] = flow_start  # 端到端计时（含等待用户选号）
 
         async def _send_job(queue_wait_ms=0):
             timings["queue_wait_ms"] = queue_wait_ms
@@ -341,7 +351,12 @@ class MoeMusicService:
         return await self.songlist_renderer.render_async(keyword, tracks, covers, timeout=self.cfg.timeout)
 
     async def _wait_for_selection(
-        self, event: AstrMessageEvent, tracks: list[Track], record_base: dict, candidate_id: int | None = None
+        self,
+        event: AstrMessageEvent,
+        tracks: list[Track],
+        record_base: dict,
+        candidate_id: int | None = None,
+        flow_start: float | None = None,
     ) -> None:
         """session_waiter 等待用户回复序号；结束后撤回候选列表（选中/取消/超范围/超时）。"""
 
@@ -373,7 +388,10 @@ class MoeMusicService:
             controller.stop()
             ev.stop_event()
             await self._send_via_queue(
-                ev, tracks[n - 1], record_ctx={**record_base, "selected_index": n, "selection_type": "picked"}
+                ev,
+                tracks[n - 1],
+                record_ctx={**record_base, "selected_index": n, "selection_type": "picked"},
+                flow_start=flow_start,
             )
             await self._recall_message(ev, candidate_id)
 
@@ -403,9 +421,10 @@ class MoeMusicService:
             return False
 
         async def _search_job(queue_wait_ms=0):
-            return await self._search_with_record(
+            tracks, _ms = await self._search_with_record(
                 event, keyword, 1, "", ctx, "command", queue_wait_ms=queue_wait_ms
             )
+            return tracks
 
         try:
             tracks = await self._run_task(_search_job)
@@ -530,8 +549,10 @@ class MoeMusicService:
 
     # ============ LLM Tool 共用 ============
 
-    async def _llm_search(self, event, keyword: str, source: str, ctx: dict) -> list[Track] | None | str:
-        """LLM 搜索任务入队；返回 tracks / None（失败已提示）/ 'busy'（队满）。"""
+    async def _llm_search(
+        self, event, keyword: str, source: str, ctx: dict
+    ) -> tuple[list[Track] | None, int] | str:
+        """LLM 搜索任务入队；返回 (tracks, search_ms) / None（失败已提示）/ 'busy'（队满）。"""
 
         async def _job(queue_wait_ms=0):
             return await self._search_with_record(
@@ -549,15 +570,17 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return "用户没有点歌权限或当前会话未开放点歌"
 
-        tracks = await self._llm_search(event, song_name, source, ctx)
-        if tracks == "busy":
+        flow_start = time.monotonic()
+        search_result = await self._llm_search(event, song_name, source, ctx)
+        if search_result == "busy":
             return "当前点歌人数较多，请稍后再试"
+        tracks, search_ms = search_result
         if tracks is None:
             return "点歌失败：音乐服务暂时不可用"
         if not tracks:
             return f"没有找到《{song_name}》相关的歌曲"
         track = tracks[0]
-        timings: dict = {}
+        timings: dict = {"_flow_start": flow_start}
 
         async def _send_job(queue_wait_ms=0):
             timings["queue_wait_ms"] = queue_wait_ms
@@ -570,6 +593,7 @@ class MoeMusicService:
                     "keyword": song_name,
                     "selected_index": 1,
                     "selection_type": "llm",
+                    "search_ms": search_ms,
                     **ctx,
                 },
                 timings=timings,
@@ -589,9 +613,10 @@ class MoeMusicService:
         if not await self._check_access(event, ctx):
             return "用户没有点歌权限或当前会话未开放点歌"
 
-        tracks = await self._llm_search(event, song_name, "", ctx)
-        if tracks == "busy":
+        search_result = await self._llm_search(event, song_name, "", ctx)
+        if search_result == "busy":
             return "当前点歌人数较多，请稍后再试"
+        tracks, _search_ms = search_result
         if tracks is None:
             return "歌词查询失败：音乐服务暂时不可用"
         if not tracks:

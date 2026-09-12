@@ -136,6 +136,7 @@ const playColumns = [
     render: (row: any) => (row.trigger_type === "llm_tool" ? "AI" : "命令"),
   },
   { title: "排队", key: "queue_wait_ms", width: 90, render: (row: any) => ms(row.queue_wait_ms) },
+  { title: "接口耗时", key: "process_ms", width: 100, render: (row: any) => ms(row.process_ms) },
   { title: "总耗时", key: "total_ms", width: 100, render: (row: any) => ms(row.total_ms) },
 ];
 

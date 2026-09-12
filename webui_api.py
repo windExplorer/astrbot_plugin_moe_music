@@ -266,7 +266,7 @@ class MoeWebUIApi:
         plays = await self.store.query(
             "SELECT id, created_at, user_name, user_id, group_name, group_id, "
             "track_name, singer, source, quality, send_mode, selection_type, "
-            "trigger_type, queue_wait_ms, total_ms FROM play_records "
+            "trigger_type, queue_wait_ms, search_ms, process_ms, total_ms FROM play_records "
             "ORDER BY id DESC LIMIT ?",
             (limit,),
         )
@@ -283,7 +283,7 @@ class MoeWebUIApi:
         plays = await self.store.query(
             "SELECT id, created_at, user_name, user_id, group_name, group_id, "
             "track_name, singer, source, quality, send_mode, selection_type, "
-            "trigger_type, queue_wait_ms, total_ms FROM play_records "
+            "trigger_type, queue_wait_ms, search_ms, process_ms, total_ms FROM play_records "
             "ORDER BY id DESC LIMIT ?",
             (limit,),
         )

@@ -59,7 +59,8 @@ class SongSender:
             bool: 是否发送成功。
         """
         timings = timings if timings is not None else {}
-        t_start = time.monotonic()
+        # 端到端起点：调用方（service）在点歌命令进入时记录；未提供则以发送任务开始计
+        t_start = float(timings.pop("_flow_start", 0.0)) or time.monotonic()
 
         try:
             t0 = time.monotonic()
@@ -102,7 +103,7 @@ class SongSender:
             timings["send_ms"] = int((time.monotonic() - t0) * 1000)
             if sent:
                 logger.info(f"[萌音点歌] 已通过 {mode} 发送歌曲《{track.display}》")
-                timings["total_ms"] = int((time.monotonic() - t_start) * 1000)
+                _finalize_timings(timings, t_start)
                 if record_ctx is not None and self.store:
                     await self.store.add_play_record(
                         **timings,
@@ -119,7 +120,7 @@ class SongSender:
                 return True
             logger.debug(f"[萌音点歌] 发送模式 {mode} 失败或不可用，尝试下一模式")
 
-        timings["total_ms"] = int((time.monotonic() - t_start) * 1000)
+        _finalize_timings(timings, t_start)
         logger.error(f"[萌音点歌] 所有发送模式均失败：《{track.display}》")
         await event.send(event.plain_result("这首歌暂时发不出来，换一首试试吧～"))
         return False
@@ -347,6 +348,15 @@ class SongSender:
                 self.download_dir.rmdir()
         except OSError as e:
             logger.warning(f"[萌音点歌] 清理临时目录失败：{e}")
+
+
+def _finalize_timings(timings: dict, t_start: float) -> None:
+    """收尾耗时统计：process_ms 为接口纯处理耗时，total_ms 为端到端总耗时。"""
+    now = time.monotonic()
+    timings["total_ms"] = int((now - t_start) * 1000)
+    timings["process_ms"] = sum(
+        timings.get(k) or 0 for k in ("resolve_ms", "download_ms", "embed_ms", "send_ms")
+    )
 
 
 async def send_lyrics_image(event, image_bytes: bytes, caption: str = "") -> bool:
