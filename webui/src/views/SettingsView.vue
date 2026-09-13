@@ -34,6 +34,7 @@ const GROUPS: Array<{ title: string; keys: string[] }> = [
       "song_limit",
       "selection_display",
       "send_modes",
+      "record_via_onebot",
       "timeout",
       "enable_lyrics",
       "embed_metadata",

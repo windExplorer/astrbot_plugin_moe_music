@@ -24,7 +24,7 @@ from .api_client import ApiError, MusicApiClient, guess_audio_ext
 from .config import PluginConfig
 from .metadata import embed_metadata
 from .model import Track, quality_rank
-from .onebot import call_action_of, to_onebot_id
+from .onebot import call_action_of, send_message_via_onebot, to_onebot_id
 
 # 非法文件名字符
 _FILENAME_STRIP = re.compile(r'[\\/:*?"<>|\r\n\t]')
@@ -77,6 +77,37 @@ class DeliveryOptions:
 
     fail_hint: str = "这首歌暂时发不出来，换一首试试吧～"
     """所有发送方式都失败时给用户的提示（文件指令用自己的文案）。"""
+
+
+# 语音文件注册到 AstrBot 文件服务后的有效期（秒）：协议端需在此期间把文件拉走
+RECORD_FILE_TTL_SEC = 900
+
+
+async def _register_file_service(path: Path) -> str | None:
+    """把本地文件注册到 AstrBot 令牌文件服务，返回协议端可直接拉取的 URL。
+
+    该路由（``/api/file/<token>``）位于 AstrBot dashboard 的鉴权白名单内：免登录、
+    token 保护、带超时，协议端无需任何鉴权即可拉取。
+    不可用时（缺 callback_api_base、导入失败、注册异常）返回 None，由调用方降级。
+    """
+    try:
+        from astrbot.core import astrbot_config, file_token_service
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        base = str(astrbot_config.get("callback_api_base", "") or "").strip().rstrip("/")
+    except Exception:  # noqa: BLE001
+        base = ""
+    if not base:
+        return None
+    try:
+        token = await file_token_service.register_file(str(path), timeout=RECORD_FILE_TTL_SEC)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[萌音点歌] 注册文件服务失败：{type(e).__name__}: {e}")
+        return None
+    if not token:
+        return None
+    return f"{base}/api/file/{token}"
 
 
 class SongSender:
@@ -323,9 +354,50 @@ class SongSender:
             logger.warning(f"[萌音点歌] 音乐卡片发送失败（客户端可能不支持）：{type(e).__name__}: {e}")
             return False
 
+    async def _onebot_file_ref(self, source: str) -> str | None:
+        """产出可直接交给协议端拉取的 file 引用（不经过 AstrBot 的 base64 转换）。
+
+        - http(s) / 其它带协议的引用：原样返回（由协议端自行下载）
+        - 本地文件：优先注册到 AstrBot 文件服务拿免登录 URL；未配置回调地址时
+          退化为 file:// URI（协议端与 AstrBot 同机时可用）
+        """
+        text = (source or "").strip()
+        if not text:
+            return None
+        if "://" in text:
+            return text
+        path = Path(text)
+        if not path.exists():
+            return None
+        url = await _register_file_service(path)
+        if url:
+            return url
+        try:
+            return path.resolve().as_uri()
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _send_record_seg_direct(self, event, source: str) -> bool:
+        """把音频以 record 段经协议端直发；返回 True 表示已发出（调用方勿再发一次）。
+
+        背景：AstrBot 的 OneBot 适配器对 ``Record`` 一律 ``convert_to_base64()``，且内部
+        ``MediaResolver`` 会强制转成 wav——体积只由音频时长决定，长音频经 base64 膨胀
+        33% 后会被协议端判为「文件太大」。直发让协议端按引用自行拉取，绕开这一步。
+        """
+        ref = await self._onebot_file_ref(source)
+        if not ref:
+            return False
+        ok, _mid = await send_message_via_onebot(event, [{"type": "record", "data": {"file": ref}}])
+        if ok:
+            logger.info(f"[萌音点歌] 语音已由协议端直发：{ref[:64]}")
+        return ok
+
     async def _send_record_link(self, event, audio_url: str) -> bool:
         if not audio_url:
             return False
+        # 链接本身即 http(s)：直接交给协议端拉取，避免框架下载后转 wav + base64
+        if self.cfg.record_via_onebot and await self._send_record_seg_direct(event, audio_url):
+            return True
         seg = Record.fromURL(audio_url)
         await event.send(event.chain_result([seg]))
         return True
@@ -338,6 +410,9 @@ class SongSender:
         path = await self._download_audio(track, audio_url, quality, timings)
         if not path:
             return False
+        # 已下载到本地：注册成文件服务 URL 或 file:// 后由协议端直发（绕开 base64）
+        if self.cfg.record_via_onebot and await self._send_record_seg_direct(event, str(path)):
+            return True
         seg = Record.fromFileSystem(str(path))
         await event.send(event.chain_result([seg]))
         return True

@@ -96,6 +96,7 @@ _EDITABLE_KEYS = {
     "song_limit",
     "selection_display",
     "send_modes",
+    "record_via_onebot",
     "timeout",
     "request_timeout",
     "queue_concurrency",

@@ -2,6 +2,18 @@
 
 本文件记录 astrbot_plugin_moe_music 的版本变更，最新版本在最上方。
 
+## v0.11.4 - 2026-09-13
+
+### 修复
+
+- **语音模式（`record_link` / `record_local`）在 NapCat 上常报「文件太大」**：AstrBot 的 OneBot 适配器对 `Record` 一律 `convert_to_base64()`，且内部 `MediaResolver` 会**强制把音频转成 wav** 再编码——体积因此只由时长决定，经 base64 膨胀 33% 后很容易超过协议端上限；把 `file` 换成网链同样无效（框架会先下载再转 wav）。现改为**经协议端直发**：`record_link` 直接下发链接，`record_local` 把已下载的音频注册为 AstrBot 文件服务链接（`/api/file/<token>`，该路由在 dashboard 鉴权白名单内、免登录、token 保护、带超时）后交由协议端自行拉取，**全程不经过 base64**。未配置 AstrBot 全局「对外可达的回调接口地址」时退化为 `file://` 本地路径（协议端与 AstrBot 同机可用）；任一环节失败都会自动回退原有 `Record` 发送方式，不会导致发不出。
+- 新增配置项「语音模式经协议端直发（规避 base64 体积限制）」（默认开启），并同步 WebUI 配置页分组。
+
+### 说明
+
+- 本次只调整语音（`record_*`）发送链路：`card` / `file_link` / `file_local` / `text` 未改动（`File` 组件本就不走 base64，框架会转成 `file://` URI）。
+- 若开启直发后仍报「文件太大」，说明卡的是语音文件体积/时长本身（QQ 对语音另有硬限制），建议改用 `file_local`（文件消息原样传输、不损失音质）。
+
 ## v0.11.3 - 2026-09-12
 
 ### 改进

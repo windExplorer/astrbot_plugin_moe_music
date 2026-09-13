@@ -63,6 +63,12 @@
         ],
         "default": ["card(音乐卡片)", "record_link(语音链接)", "file_local(本地文件)", "text(文本链接)"]
     },
+    "record_via_onebot": {
+        "description": "语音模式经协议端直发（规避 base64 体积限制）",
+        "hint": "开启后，record_link / record_local 不再交给框架发送，而是直接调用协议端（NapCat）接口：本地音频优先注册为 AstrBot 文件服务链接（需在 AstrBot 全局配置填「对外可达的回调接口地址」，且协议端能访问该地址），未配置时退化为 file:// 本地路径，由协议端自行拉取。作用：框架的 OneBot 适配器会把语音一律转成 wav 再 base64（体积膨胀且不可控），长音频会被协议端判为「文件太大」；直发可绕开这一步。任何环节失败都会自动回退原有发送方式，不会导致发不出。",
+        "type": "bool",
+        "default": true
+    },
     "timeout": {
         "description": "选歌等待超时（秒）",
         "hint": "发送候选列表后，用户在此时间内回复序号有效，超时自动取消",

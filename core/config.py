@@ -102,6 +102,7 @@ class PluginConfig:
     song_limit: int = 5
     selection_display: str = "text"  # 候选列表显示方式：text(文本列表) / image(图片菜单)
     send_modes: list[str] = field(default_factory=lambda: ["card", "record_link", "file_local", "text"])
+    record_via_onebot: bool = True  # 语音经协议端直发，绕开框架的 base64 + 强制转 wav
     timeout: int = 15
     request_timeout: int = 10
     queue_concurrency: int = 1  # 点歌任务并发度（默认串行：上一个任务完成再执行下一个）
@@ -177,6 +178,7 @@ class PluginConfig:
             song_limit=song_limit,
             selection_display=selection_display,
             send_modes=send_modes,
+            record_via_onebot=bool(config.get("record_via_onebot", True)),
             timeout=_int_opt("timeout", 15, 5, 60),
             request_timeout=_int_opt("request_timeout", 10, 5, 30),
             queue_concurrency=_int_opt("queue_concurrency", 1, 1, 5),
