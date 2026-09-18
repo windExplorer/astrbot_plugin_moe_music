@@ -859,14 +859,48 @@ class MoeMusicService:
         )
 
     async def _card_cover(self, track: Track) -> bytes | None:
-        """取封面字节；失败返回 None（卡片画占位图）。"""
+        """取封面字节；逐级降级，全失败返回 None（卡片画占位图）。
+
+        顺序：搜索/详情自带的 ``coverUrl`` → 缓存（补齐任务存的网易云封面）→
+        后端 ``/music/:id/pic``（kw/kg/tx 有实现）→ 网易云详情实时补（wy 音源
+        没有 pic 实现、详情也不带 picUrl，卡片封面只能来自这里）。
+        """
+        url = track.cover_url
+        if not url and self.info_cache is not None:
+            try:
+                url = str((await self.info_cache.get_song(track.id)).get("cover_url") or "")
+            except Exception:
+                url = ""
+        if not url:
+            try:
+                url = await self.api.pic(track.id) or ""
+            except Exception as e:
+                logger.debug(f"[萌音点歌] 后端封面接口失败：{type(e).__name__}: {e}")
+                url = ""
+        if not url and track.source == "wy" and self.enricher is not None:
+            tried_at = None
+            if self.info_cache is not None:
+                tried_at = (await self.info_cache.get_song(track.id)).get("cover_at")
+            if not fresh(None, tried_at):  # 近期试过仍无封面 → 该歌确实没有，7 天内不再试
+                wy_id = track.id.split(":", 1)[-1]
+                detail = await self.enricher.fetch_wy_detail(wy_id) or {}
+                url = str(detail.get("cover") or "")
+                if self.info_cache is not None:
+                    # 详情顺带拿到了年份/简介就一并入库，背景补齐任务无需再拉一次
+                    fields = {"cover_at": time.time()}
+                    if url:
+                        fields["cover_url"] = url
+                    if detail.get("year"):
+                        fields["year"] = detail["year"]
+                    if detail.get("intro"):
+                        fields["intro"] = detail["intro"]
+                    await self.info_cache.upsert_song(track.id, **fields)
+        if not url:
+            return None
         try:
-            url = await self.api.pic(track.id)
-            if not url:
-                return None
             return await self.api.download_bytes(url)
         except Exception as e:
-            logger.debug(f"[萌音点歌] 卡片封面获取失败：{type(e).__name__}: {e}")
+            logger.debug(f"[萌音点歌] 封面下载失败（{url}）：{type(e).__name__}: {e}")
             return None
 
     @staticmethod
@@ -932,18 +966,22 @@ class MoeMusicService:
         row = await self.info_cache.get_song(track.id)
         fields: dict = {"info_at": time.time()}
 
-        # 年份 + 歌曲简介：一次网易云详情调用同时拿（简介缺 album 文案时 LLM 兜底）
+        # 年份 + 歌曲简介 + 封面：一次网易云详情调用同时拿（简介缺 album 文案时 LLM 兜底）
+        # 注意：详情调用只由年份/简介的新鲜度驱动——封面缺失本身不允许绕过负缓存
+        # 反复拉接口（封面有独立的 cover_at 负缓存，见 _card_cover）。
         wy_detail: dict = {}
         if need_year or need_intro:
             wy_id = str(row.get("wy_id") or "")
             if not fresh(wy_id, row.get("mapped_at")):
                 wy_id = await self.enricher.resolve_wy_id(track) or ""
                 await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
-            if wy_id and (
-                not fresh(row.get("year"), row.get("info_at"))
-                or not fresh(row.get("intro"), row.get("info_at"))
-            ):
+            detail_needed = not fresh(
+                row.get("year"), row.get("info_at")
+            ) or not fresh(row.get("intro"), row.get("info_at"))
+            if wy_id and detail_needed:
                 wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
+            if wy_detail.get("cover"):
+                fields["cover_url"] = wy_detail["cover"]
             if need_year and not fresh(row.get("year"), row.get("info_at")) and wy_detail.get("year"):
                 fields["year"] = wy_detail["year"]
             if need_intro and not fresh(row.get("intro"), row.get("info_at")):

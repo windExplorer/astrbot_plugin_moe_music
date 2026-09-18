@@ -44,10 +44,19 @@ class FakeCardRenderer:
 class FakeEnricher:
     """假增强抓取器：记录调用次数，便于断言负缓存是否生效。"""
 
-    def __init__(self, wy_id="186016", year=2014, intro="测试歌曲简介", comment=None, bio="测试歌手简介"):
+    def __init__(
+        self,
+        wy_id="186016",
+        year=2014,
+        intro="测试歌曲简介",
+        cover="http://h/wy-cover.jpg",
+        comment=None,
+        bio="测试歌手简介",
+    ):
         self.wy_id = wy_id
         self.year = year
         self.intro = intro
+        self.cover = cover
         self.comment = comment
         self.bio = bio
         self.wy_calls = 0
@@ -67,6 +76,8 @@ class FakeEnricher:
             detail["year"] = self.year
         if self.intro:
             detail["intro"] = self.intro
+        if self.cover:
+            detail["cover"] = self.cover
         return detail
 
     async def fetch_year(self, wy_id):
@@ -231,6 +242,7 @@ class TestBackgroundEnrich:
             row = await service.info_cache.get_song("wy:1")
             assert row["year"] == 2014
             assert row["intro"] == "测试歌曲简介"
+            assert row["cover_url"] == "http://h/wy-cover.jpg"
             assert row["wy_id"] == "186016"
             artist = await service.info_cache.get_artist("歌手1")
             assert artist["bio"] == "测试歌手简介"
@@ -267,7 +279,9 @@ class TestBackgroundEnrich:
             )
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
-            assert (enricher.wy_calls, enricher.detail_calls, enricher.bio_calls) == (0, 0, [])
+            # 增强全关，但卡片封面仍需 wy 详情兜底（wy 音源无 pic 实现）
+            assert (enricher.wy_calls, enricher.bio_calls) == (0, [])
+            assert enricher.detail_calls == 1
 
     async def test_failed_fetch_not_retried_on_next_play(self, tmp_path):
         """抓不到也要记时间戳：否则每次点这首歌都会重打一遍外部接口。"""
@@ -275,6 +289,7 @@ class TestBackgroundEnrich:
             service, _, enricher = make_service(api, tmp_path)
             enricher.year = None
             enricher.intro = None
+            enricher.cover = None
             enricher.bio = None
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
@@ -282,7 +297,8 @@ class TestBackgroundEnrich:
                 MockEvent(umo="qq:GroupMessage:88888"), "晴天", index_hint=1
             )
             await drain_background(service)
-            assert enricher.detail_calls == 1  # 负缓存生效，不再重试
+            # 第一次：卡片封面 1 次 + 补齐 1 次；第二次全部被负缓存拦下
+            assert enricher.detail_calls == 2
             assert enricher.intro_calls == 1  # LLM 简介同样只试一次
             assert enricher.bio_calls == ["歌手1"]
 
@@ -355,6 +371,26 @@ class TestRecentTrackQuote:
             track, ts = service._recent_tracks[umo]
             service._recent_tracks[umo] = (track, ts - 601)  # 超过 TTL
             assert service.last_track(MockEvent()) is None
+
+    async def test_wy_cover_fallback_via_live_detail(self, tmp_path):
+        """wy 音源没有 pic 实现（后端 404）且曲目无 coverUrl：实时拉网易云详情补封面并写缓存。"""
+        from aiohttp import web as _web
+
+        async def cover_bytes(request):
+            return _web.Response(body=jpeg_bytes(), content_type="image/jpeg")
+
+        async with FakeBackend(
+            search_result=[track_json(1) | {"coverUrl": None}],
+            extra_routes={"/wy-cover.jpg": cover_bytes},
+        ) as api:
+            service, renderer, enricher = make_service(api, tmp_path)
+            enricher.cover = f"{api._base_url}/wy-cover.jpg"  # 指向本地假服务，真实可下载
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
+            assert renderer.calls[0]["cover"][:2] == b"\xff\xd8"  # 占位图被换成真封面
+            row = await service.info_cache.get_song("wy:1")
+            assert row["cover_url"] == enricher.cover  # 已写缓存，下次不再拉详情
+            assert enricher.detail_calls == 1  # 卡片路径拿详情时年份/简介一并入库
 
     async def test_no_cache_no_card_info(self, tmp_path):
         """缓存不可用（None）时卡片照样发，只是没有增强信息。"""

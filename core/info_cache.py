@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS song_meta (
     wy_id             TEXT,               -- 映射到的网易云曲目 id（空 = 尚未成功映射）
     year              INTEGER,            -- 发行年份（空/0 = 未知）
     intro             TEXT,               -- 歌曲简介（网易云专辑简介或 LLM 生成）
+    cover_url         TEXT,               -- 封面直链（后端 wy 无 pic 实现时由此补）
+    cover_at          REAL,               -- 封面「尝试」完成时间（含失败，负缓存用）
     hot_comment       TEXT,               -- 热评第一条正文
     hot_comment_user  TEXT,               -- 热评用户昵称
     hot_comment_likes INTEGER,            -- 热评点赞数
@@ -59,6 +61,8 @@ _SONG_COLUMNS = {
     "wy_id",
     "year",
     "intro",
+    "cover_url",
+    "cover_at",
     "hot_comment",
     "hot_comment_user",
     "hot_comment_likes",

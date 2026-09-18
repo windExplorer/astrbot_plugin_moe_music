@@ -119,13 +119,25 @@ class MoeMusicPlugin(Star):
         )
 
     async def _llm_provider_for(self, umo: str | None = None):
-        """取当前会话的对话模型（歌手简介用）；没有可用模型时返回 None。"""
+        """取可用的对话模型（简介生成用）；没有可用模型时返回 None。
+
+        优先当前会话使用的模型；会话没有指定（或开了会话隔离但没选过）时退回
+        全局任意一个 Chat Provider——卡片简介不值得因为「没选模型」而缺失。
+        """
         if self.context is None:
             return None
         try:
-            return await self.context.get_using_provider_async(umo)
+            provider = await self.context.get_using_provider_async(umo)
         except Exception as e:
-            logger.debug(f"[萌音点歌] 获取对话模型失败：{type(e).__name__}: {e}")
+            logger.debug(f"[萌音点歌] 获取会话对话模型失败：{type(e).__name__}: {e}")
+            provider = None
+        if provider is not None:
+            return provider
+        try:
+            providers = self.context.get_all_providers()
+            return providers[0] if providers else None
+        except Exception as e:
+            logger.debug(f"[萌音点歌] 获取可用对话模型列表失败：{type(e).__name__}: {e}")
             return None
 
     @staticmethod

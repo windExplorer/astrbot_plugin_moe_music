@@ -197,13 +197,15 @@ class Enricher:
         logger.debug(f"[萌音点歌] 同曲映射未命中（歌名/歌手不吻合）：《{track.display}》")
         return None
 
-    # ============ 2. 网易云歌曲详情（发行年份 + 专辑简介） ============
+    # ============ 2. 网易云歌曲详情（发行年份 + 专辑简介 + 封面） ============
 
     async def fetch_wy_detail(self, wy_id: str) -> dict:
-        """取网易云歌曲详情：``{"year": 发行年份或 None, "intro": 专辑简介或 None}``。
+        """取网易云歌曲详情：``{"year", "intro", "cover"}``（缺哪项就没有哪个键）。
 
-        专辑简介（``album.description``）常带 HTML 标签，这里剥离后作为「歌曲简介」
-        的首选来源（比 LLM 生成可靠）；没有就交给 LLM。
+        - ``year``：``album.publishTime``（毫秒时间戳）；
+        - ``intro``：``album.description``（常带 HTML，剥离后作「歌曲简介」首选来源）；
+        - ``cover``：``album.picUrl``——后端 wy 音源没有 pic 实现且详情不带 picUrl，
+          这是网易云歌曲封面的主要来源。
         """
         if not wy_id:
             return {}
@@ -224,6 +226,9 @@ class Enricher:
         intro = _strip_html(str(album.get("description") or ""))
         if intro:
             detail["intro"] = _clean_text(intro, 160)
+        cover = str(album.get("picUrl") or song.get("picUrl") or "").strip()
+        if cover.startswith("http"):
+            detail["cover"] = cover
         return detail
 
     async def fetch_year(self, wy_id: str) -> int | None:
