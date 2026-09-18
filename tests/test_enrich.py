@@ -127,26 +127,28 @@ class TestFetchYear:
     async def test_parses_millisecond_timestamp(self, wy_server):
         assert await make_enricher().fetch_year("186016") == 2003
 
-    async def test_detail_returns_year_and_intro(self, wy_server):
-        """网易云详情一次拿年份和专辑简介（简介剥离 HTML 标签）。"""
+    async def test_detail_returns_year_and_cover(self, wy_server):
+        """网易云详情一次拿年份和封面（专辑文案不再作为简介来源）。"""
         wy_server["detail"] = {
             "songs": [
                 {
                     "album": {
                         "publishTime": 1062864000000,
-                        "description": "第一行<br/>第二行 &amp; 彩蛋",
+                        "description": "专辑宣传文案，不再使用",
+                        "picUrl": "https://p.example/cover.jpg",
                     }
                 }
             ]
         }
         detail = await make_enricher().fetch_wy_detail("1")
         assert detail["year"] == 2003
-        assert detail["intro"] == "第一行 第二行 & 彩蛋"
+        assert detail["cover"] == "https://p.example/cover.jpg"
+        assert "intro" not in detail
 
-    async def test_detail_without_intro(self, wy_server):
-        wy_server["detail"] = {"songs": [{"album": {"publishTime": 1062864000000, "description": ""}}]}
+    async def test_detail_without_cover(self, wy_server):
+        wy_server["detail"] = {"songs": [{"album": {"publishTime": 1062864000000}}]}
         detail = await make_enricher().fetch_wy_detail("1")
-        assert detail["year"] == 2003 and "intro" not in detail
+        assert detail["year"] == 2003 and "cover" not in detail
 
     async def test_parses_second_timestamp(self, wy_server):
         wy_server["detail"] = {"songs": [{"publishTime": int(time.time())}]}
@@ -295,68 +297,118 @@ class TestResolveWyId:
         assert await enricher.resolve_wy_id(make_track(id="tx:1", source="tx")) is None
 
 
-class TestArtistBio:
-    async def test_bio_returned_and_cleaned(self):
-        provider = FakeProvider('  "华语流行歌手，代表作《晴天》。"  ')
-        bio = await make_enricher(provider=provider).fetch_artist_bio("周杰伦", "umo")
-        assert bio == "华语流行歌手，代表作《晴天》。"
-        assert "周杰伦" in provider.prompts[0]
+class TestCardInfoLlm:
+    """一次 LLM 调用同时获取歌曲简介 + 歌手简介（+ 年份兜底），JSON 输出。"""
 
-    async def test_no_data_answer_skipped(self):
-        for text in ("暂无资料", "抱歉，我不确定这位歌手是谁"):
-            assert await make_enricher(provider=FakeProvider(text)).fetch_artist_bio("某某") is None
+    async def test_json_parsed_all_fields(self):
+        provider = FakeProvider(
+            '{"year": 2003, "intro": "收录于《叶惠美》的抒情代表作。", '
+            '"artist_bio": "华语流行歌手，代表作《晴天》。"}'
+        )
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_year=True, need_intro=True, need_bio=True, umo="umo"
+        )
+        assert data == {
+            "year": 2003,
+            "intro": "收录于《叶惠美》的抒情代表作。",
+            "artist_bio": "华语流行歌手，代表作《晴天》。",
+        }
+        assert "晴天" in provider.prompts[0] and "周杰伦" in provider.prompts[0]
 
-    async def test_empty_answer_skipped(self):
-        assert await make_enricher(provider=FakeProvider("")).fetch_artist_bio("某某") is None
+    async def test_code_fence_and_prose_stripped(self):
+        provider = FakeProvider('好的，如下：\n```json\n{"intro": "秋日抒情小品。"}\n```')
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data["intro"] == "秋日抒情小品。"
 
-    async def test_no_provider_skipped(self):
-        assert await make_enricher(provider=None).fetch_artist_bio("周杰伦") is None
+    async def test_only_requested_fields_asked(self):
+        provider = FakeProvider('{"intro": "只有简介。"}')
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data == {"intro": "只有简介。"}
+        assert '"artist_bio"' not in provider.prompts[0]
+        assert '"year"' not in provider.prompts[0]
 
-    async def test_provider_error_skipped(self):
+    async def test_null_fields_omitted(self):
+        provider = FakeProvider('{"year": null, "intro": null, "artist_bio": null}')
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_year=True, need_intro=True, need_bio=True
+        )
+        assert data == {}
+
+    async def test_unreasonable_year_rejected(self):
+        provider = FakeProvider('{"year": 12345}')
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_year=True
+        )
+        assert data == {}
+
+    async def test_no_data_marks_rejected(self):
+        provider = FakeProvider('{"intro": "抱歉，暂无资料"}')
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data == {}
+
+    async def test_garbage_output_returns_empty(self):
+        provider = FakeProvider("这不是 JSON")
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data == {}
+
+    async def test_no_provider_returns_empty(self):
+        data = await make_enricher(provider=None).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data == {}
+
+    async def test_provider_error_returns_empty(self):
         import asyncio
 
         provider = FakeProvider(error=asyncio.TimeoutError())
-        assert await make_enricher(provider=provider).fetch_artist_bio("周杰伦") is None
+        data = await make_enricher(provider=provider).fetch_card_info(
+            make_track(), need_intro=True
+        )
+        assert data == {}
 
-    async def test_too_long_bio_truncated(self):
-        bio = await make_enricher(provider=FakeProvider("长" * 300)).fetch_artist_bio("周杰伦")
-        assert bio is not None and len(bio) <= enrich_mod.BIO_MAX_CHARS + 1 and bio.endswith("…")
-
-    async def test_provider_getter_error_skipped(self):
+    async def test_provider_getter_error_returns_empty(self):
         async def _boom(_umo):
             raise RuntimeError("no provider")
 
         enricher = Enricher(FakeApi(), provider_getter=_boom)
-        assert await enricher.fetch_artist_bio("周杰伦") is None
+        assert await enricher.fetch_card_info(make_track(), need_intro=True) == {}
 
-    async def test_blank_singer_skipped(self):
-        provider = FakeProvider("x")
-        assert await make_enricher(provider=provider).fetch_artist_bio("   ") is None
-        assert provider.prompts == []
-
-
-class TestSongIntro:
-    """歌曲简介的 LLM 兜底（首选是网易云专辑简介，见 TestFetchYear）。"""
-
-    async def test_intro_returned(self):
-        provider = FakeProvider(" 收录于 2004 年专辑《七里香》，流行抒情代表作。 ")
-        intro = await make_enricher(provider=provider).fetch_song_intro(make_track())
-        assert intro and "七里香" in intro
-        assert "晴天" in provider.prompts[0] and "周杰伦" in provider.prompts[0]
-
-    async def test_no_data_or_error_skipped(self):
-        import asyncio
-
-        assert await make_enricher(provider=FakeProvider("暂无资料")).fetch_song_intro(make_track()) is None
-        assert await make_enricher(
-            provider=FakeProvider(error=asyncio.TimeoutError())
-        ).fetch_song_intro(make_track()) is None
-        assert await make_enricher(provider=None).fetch_song_intro(make_track()) is None
-
-    async def test_no_title_skipped(self):
-        from types import SimpleNamespace
-
-        provider = FakeProvider("x")
+    async def test_no_title_returns_empty(self):
+        provider = FakeProvider("{}")
         bare = SimpleNamespace(name="  ", singer="", source="wy", id="wy:1", display="x")
-        assert await make_enricher(provider=provider).fetch_song_intro(bare) is None
+        data = await make_enricher(provider=provider).fetch_card_info(
+            bare, need_intro=True
+        )
+        assert data == {}
         assert provider.prompts == []
+
+    async def test_nothing_needed_returns_empty_without_llm(self):
+        provider = FakeProvider("{}")
+        data = await make_enricher(provider=provider).fetch_card_info(make_track())
+        assert data == {}
+        assert provider.prompts == []
+
+    async def test_llm_ask_callable_preferred(self):
+        """注入 llm_ask（联网搜索 agent 循环）时优先于直调 provider。"""
+        calls: list[str] = []
+
+        async def _ask(event, umo, prompt, system_prompt):
+            calls.append(prompt)
+            return '{"intro": "来自联网搜索的简介。"}'
+
+        enricher = Enricher(FakeApi(), provider_getter=_boom_getter, llm_ask=_ask)
+        data = await enricher.fetch_card_info(make_track(), need_intro=True, umo="umo")
+        assert data["intro"] == "来自联网搜索的简介。"
+        assert calls and "晴天" in calls[0]
+
+
+async def _boom_getter(_umo):
+    raise RuntimeError("should not be called")

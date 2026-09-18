@@ -804,7 +804,7 @@ class MoeMusicService:
             else:
                 # 增强信息（年份/简介/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
                 # 下次这首歌 / 这位歌手就能用上完整卡片
-                self._schedule_enrich(track, umo)
+                self._schedule_enrich(track, umo, event=event)
         if sent and delivery is None and self.cfg.enable_lyrics:
             try:
                 await self.send_lyrics_for_track(event, track, quiet=True)
@@ -862,8 +862,8 @@ class MoeMusicService:
     async def _card_info_ready(self, track: Track) -> bool:
         """卡片增强信息是否已备齐（缓存全命中）——决定卡片与歌曲谁先发。
 
-        判定与 ``_enrich_song`` / ``_enrich_artist`` 的「要不要补」保持一致：任一
-        开启项还要联网或调 LLM，就视为没备齐 → 先发歌，卡片等补齐完成后再补发。
+        判定与 ``_enrich_song`` 的「要不要补」保持一致：任一开启项还要联网或调
+        LLM，就视为没备齐 → 先发歌，卡片等补齐完成后再补发。
 
         ``song_card_llm_sync`` 关闭时不等 LLM（歌曲简介/歌手简介纯后台补），
         卡片只发缓存里已有的——首次就是基础卡片。
@@ -901,7 +901,11 @@ class MoeMusicService:
         return True
 
     async def _card_info(self, track: Track) -> CardInfo:
-        """从缓存取卡片增强信息；缓存不可用/为空时返回空信息（卡片自动少画几块）。"""
+        """从缓存取卡片增强信息；缓存不可用/为空时返回空信息（卡片自动少画几块）。
+
+        ``song_card_llm_sync`` 是信息获取的总开关：关闭时年份/歌曲简介/歌手简介
+        不渲染进卡片（热评/封面走接口，不受影响）。
+        """
         if self.info_cache is None:
             return CardInfo()
         try:
@@ -917,10 +921,11 @@ class MoeMusicService:
             except (TypeError, ValueError):
                 return 0
 
+        llm_on = self.cfg.song_card_llm_sync
         return CardInfo(
-            year=_int(row.get("year")),
-            intro=str(row.get("intro") or ""),
-            artist_bio=str(artist.get("bio") or ""),
+            year=_int(row.get("year")) if llm_on else 0,
+            intro=str(row.get("intro") or "") if llm_on else "",
+            artist_bio=str(artist.get("bio") or "") if llm_on else "",
             hot_comment=str(row.get("hot_comment") or ""),
             hot_comment_user=str(row.get("hot_comment_user") or ""),
             hot_comment_likes=_int(row.get("hot_comment_likes")),
@@ -955,16 +960,12 @@ class MoeMusicService:
                 detail = await self.enricher.fetch_wy_detail(wy_id) or {}
                 url = str(detail.get("cover") or "")
                 if self.info_cache is not None:
-                    # 详情顺带拿到了年份/专辑文案就一并入库，背景补齐任务无需再拉一次；
-                    # 专辑文案只是简介的占位（intro_source=album），补齐时会被 LLM 升级
+                    # 详情顺带拿到了年份就一并入库，补齐任务无需再为年份拉一次详情
                     fields = {"cover_at": time.time()}
                     if url:
                         fields["cover_url"] = url
                     if detail.get("year"):
                         fields["year"] = detail["year"]
-                    if detail.get("intro"):
-                        fields["intro"] = detail["intro"]
-                        fields["intro_source"] = "album"
                     await self.info_cache.upsert_song(track.id, **fields)
         if not url:
             return None
@@ -983,21 +984,24 @@ class MoeMusicService:
 
     # ============ 增强信息后台补齐 ============
 
-    def _schedule_enrich(self, track: Track, umo: str | None) -> None:
+    def _schedule_enrich(self, track: Track, umo: str | None, event=None) -> None:
         """把「补年份 / 补简介 / 补热评 / 补歌手简介」丢到后台任务，不阻塞发歌。"""
         if self.enricher is None or self.info_cache is None:
             return
         if not self.cfg.song_card_enable:
             return
-        if not (
-            self.cfg.song_card_year
-            or self.cfg.song_card_intro
-            or self.cfg.song_card_comment
-            or self.cfg.song_card_artist_bio
-        ):
+        llm_fields = (
+            self.cfg.song_card_llm_sync
+            and (
+                self.cfg.song_card_year
+                or self.cfg.song_card_intro
+                or self.cfg.song_card_artist_bio
+            )
+        )
+        if not (llm_fields or self.cfg.song_card_comment):
             return
         try:
-            task = asyncio.create_task(self._enrich_track(track, umo))
+            task = asyncio.create_task(self._enrich_track(track, umo, event=event))
         except RuntimeError:  # 事件循环不可用（插件卸载中）
             logger.debug("[萌音点歌] 事件循环不可用，跳过信息补齐")
             return
@@ -1033,7 +1037,7 @@ class MoeMusicService:
         unified_msg_origin 路由）——补发发生在流水线结束之后，事件对象可能已经
         不可用；没有回调（测试/降级）再回退 ``event.send``。
         """
-        await self._enrich_track(track, umo)
+        await self._enrich_track(track, umo, event=event)
         try:
             card = await self._prepare_song_card(event, track, delivery)
             if card is None:
@@ -1051,11 +1055,18 @@ class MoeMusicService:
         except Exception:
             logger.warning(f"[萌音点歌] 补发信息卡片失败：\n{traceback.format_exc()}")
 
-    async def _enrich_track(self, track: Track, umo: str | None) -> None:
-        """补齐一首歌的增强信息（任何失败都只记日志，负缓存避免反复打接口）。"""
+    async def _enrich_track(self, track: Track, umo: str | None, event=None) -> None:
+        """补齐一首歌的卡片增强信息（任何失败都只记日志，负缓存避免反复打接口）。
+
+        信息获取只有两条独立通道：
+        - **接口**（事实数据）：封面 / 年份（网易云详情）、热评（wy/kw/kg）；
+        - **LLM**（``song_card_llm_sync`` 总开关）：一次调用同时取歌曲简介 +
+          歌手简介（+ 年份兜底），会话开启联网搜索时 LLM 会自行搜索核实。
+        ``song_card_year`` / ``song_card_intro`` / ``song_card_artist_bio`` 只是
+        渲染开关，决定要不要这个字段。
+        """
         try:
-            await self._enrich_song(track, umo)
-            await self._enrich_artist(track, umo)
+            await self._enrich_song(track, umo, event=event)
             await self._log_enrich_result(track)
         except asyncio.CancelledError:
             raise
@@ -1079,48 +1090,76 @@ class MoeMusicService:
             f" 歌手简介={'有' if artist.get('bio') else '无'}"
         )
 
-    async def _enrich_song(self, track: Track, umo: str | None = None) -> None:
-        """补网易云映射 id / 发行年份 / 歌曲简介 / 热评。"""
-        need_year = self.cfg.song_card_year
-        need_intro = self.cfg.song_card_intro
+    async def _enrich_song(self, track: Track, umo: str | None = None, event=None) -> None:
+        """补齐一首歌的卡片信息：接口（封面/年份/热评）+ LLM（简介/歌手简介，一次调用）。
+
+        渲染开关（song_card_year / intro / artist_bio）只决定要不要这个字段；
+        总开关 song_card_llm_sync 决定是否启用 LLM 获取——关闭时简介/歌手简介/年份
+        不渲染也不获取（封面/热评仍走接口）。
+        """
+        llm_on = self.cfg.song_card_llm_sync
+        need_year = llm_on and self.cfg.song_card_year
+        need_intro = llm_on and self.cfg.song_card_intro
+        need_bio = llm_on and self.cfg.song_card_artist_bio and bool(track.singer)
         need_comment = self.cfg.song_card_comment
-        if not (need_year or need_intro or need_comment):
+        if not (need_year or need_intro or need_bio or need_comment):
             return
         row = await self.info_cache.get_song(track.id)
+        artist = (
+            await self.info_cache.get_artist(track.singer) if need_bio and track.singer else {}
+        )
         fields: dict = {"info_at": time.time()}
+        artist_fields: dict = {}
 
-        # 年份 + 封面：一次网易云详情调用同时拿。注意：详情调用只由年份的新鲜度驱动，
-        # 封面缺失本身不允许绕过负缓存反复拉接口（封面有独立的 cover_at 负缓存，
-        # 见 _card_cover）。
-        wy_detail: dict = {}
-        if need_year or need_intro:
+        # 1) 年份：网易云详情（事实数据，不走 LLM）；封面缺失顺带补。
+        #    详情调用只由年份的新鲜度驱动，封面缺失本身不允许绕过负缓存反复拉
+        #    接口（封面有独立的 cover_at 负缓存，见 _card_cover）。
+        if need_year:
             wy_id = str(row.get("wy_id") or "")
             if not fresh(wy_id, row.get("mapped_at")):
                 wy_id = await self.enricher.resolve_wy_id(track) or ""
                 await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
             if wy_id and not fresh(row.get("year"), row.get("info_at")):
                 wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
-            if wy_detail.get("cover"):
-                fields["cover_url"] = wy_detail["cover"]
-            if need_year and not fresh(row.get("year"), row.get("info_at")) and wy_detail.get("year"):
-                fields["year"] = wy_detail["year"]
+                if wy_detail.get("cover"):
+                    fields["cover_url"] = wy_detail["cover"]
+                if wy_detail.get("year"):
+                    fields["year"] = wy_detail["year"]
 
-        # 歌曲简介：以 LLM 生成的**歌曲**简介为主体。专辑文案（intro_source=album）只是
-        # 首发卡片路径顺手存的占位文案，会在补齐时被 LLM 版本升级替换；LLM 不可用 /
-        # 不认识这首歌时才保留专辑文案，不让简介栏空着。
-        if (
+        # 2) LLM 一次调用：歌曲简介 + 歌手简介（+ 网易云没给时年份兜底）。
+        #    拿不到的字段不编造；负缓存（info_at / attempt_at）避免反复调。
+        intro_pending = (
             need_intro
             and (not row.get("intro") or row.get("intro_source") != "llm")
             and not fresh(None, row.get("info_at"))
-        ):
-            intro = await self.enricher.fetch_song_intro(track, umo)
-            if not intro and not row.get("intro"):
-                intro = wy_detail.get("intro")  # LLM 没给：专辑文案兜底（仅当本次拉到详情）
-            if intro:
-                fields["intro"] = intro
-                fields["intro_source"] = "album" if intro == wy_detail.get("intro") else "llm"
+        )
+        bio_pending = need_bio and not fresh(
+            artist.get("bio"), artist.get("attempt_at")
+        )
+        year_pending = need_year and not fields.get("year") and not fresh(
+            row.get("year"), row.get("info_at")
+        )
+        if self.enricher is not None and (intro_pending or bio_pending or year_pending):
+            data = await self.enricher.fetch_card_info(
+                track,
+                need_year=year_pending,
+                need_intro=intro_pending,
+                need_bio=bio_pending,
+                event=event,
+                umo=umo,
+            ) or {}
+            if intro_pending and data.get("intro"):
+                fields["intro"] = data["intro"]
+                fields["intro_source"] = "llm"
+            if year_pending and data.get("year") and not fields.get("year"):
+                fields["year"] = data["year"]
+            if bio_pending:
+                artist_fields["attempt_at"] = time.time()
+                if data.get("artist_bio"):
+                    artist_fields["bio"] = data["artist_bio"]
+                    artist_fields["source"] = "llm"
 
-        # 热评按曲目所在平台直取（wy/kw/kg），其余平台回退网易云同曲映射
+        # 3) 热评按曲目所在平台直取（wy/kw/kg），其余平台回退网易云同曲映射（接口）
         if need_comment and not fresh(row.get("hot_comment"), row.get("info_at")):
             comment, source = await self.enricher.fetch_hot_comment_for_track(track)
             if comment:
@@ -1129,6 +1168,8 @@ class MoeMusicService:
                 fields["hot_comment_likes"] = comment["likes"]
                 fields["hot_comment_source"] = source
         await self.info_cache.upsert_song(track.id, **fields)
+        if artist_fields:
+            await self.info_cache.upsert_artist(track.singer, **artist_fields)
 
     # ============ 会话最近点歌记忆（引用卡片/语音还原曲目） ============
 
@@ -1191,22 +1232,6 @@ class MoeMusicService:
             },
             delivery=delivery,
         )
-
-    async def _enrich_artist(self, track: Track, umo: str | None) -> None:
-        """补歌手简介（LLM，歌手维度复用：同一位歌手只生成一次）。"""
-        if not self.cfg.song_card_artist_bio or not track.singer:
-            return
-        row = await self.info_cache.get_artist(track.singer)
-        if fresh(row.get("bio"), row.get("attempt_at")):
-            return
-        bio = await self.enricher.fetch_artist_bio(track.singer, umo)
-        fields: dict = {"attempt_at": time.time()}
-        if bio:
-            fields["bio"] = bio
-            fields["source"] = "llm"
-        await self.info_cache.upsert_artist(track.singer, **fields)
-        if bio:
-            logger.info(f"[萌音点歌] 已缓存歌手简介：{track.singer}")
 
     async def shutdown_background(self) -> None:
         """取消后台信息补齐任务（插件卸载时调用）。"""

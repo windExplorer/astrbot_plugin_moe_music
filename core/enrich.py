@@ -19,6 +19,7 @@
 
 import asyncio
 import hashlib
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -105,6 +106,7 @@ class Enricher:
         *,
         proxy: str = "",
         provider_getter: Callable[[str | None], Awaitable[Any]] | None = None,
+        llm_ask: Callable[..., Awaitable[str | None]] | None = None,
         fetch_timeout: float = FETCH_TIMEOUT,
         llm_timeout: float = LLM_TIMEOUT,
     ):
@@ -113,12 +115,16 @@ class Enricher:
             api: :class:`MusicApiClient`（非网易云曲目要靠它做同曲映射）。
             proxy: 外部请求代理（与音乐后端共用配置，留空直连）。
             provider_getter: ``async (umo) -> LLM Provider | None``；不传则跳过 AI 简介。
+            llm_ask: ``async (event, umo, prompt, system_prompt) -> str | None``；
+                由插件注入（会话开启联网搜索时走 agent 循环，LLM 可调用搜索工具）。
+                注入后优先于 provider_getter 使用。
             fetch_timeout: 外部接口超时（秒）。
             llm_timeout: LLM 超时（秒）。
         """
         self.api = api
         self._proxy = proxy.strip() or None
         self._provider_getter = provider_getter
+        self._llm_ask = llm_ask
         self._fetch_timeout = max(1.0, fetch_timeout)
         self._llm_timeout = max(3.0, llm_timeout)
         self._session: aiohttp.ClientSession | None = None
@@ -200,11 +206,9 @@ class Enricher:
     # ============ 2. 网易云歌曲详情（发行年份 + 专辑简介 + 封面） ============
 
     async def fetch_wy_detail(self, wy_id: str) -> dict:
-        """取网易云歌曲详情：``{"year", "intro", "cover"}``（缺哪项就没有哪个键）。
+        """取网易云歌曲详情：``{"year", "cover"}``（缺哪项就没有哪个键）。
 
-        - ``year``：``album.publishTime``（毫秒时间戳）；
-        - ``intro``：``album.description``（常带 HTML，剥离后作简介的**占位/兜底**文案；
-          卡片简介以 LLM 生成的歌曲简介为主体，见 ``SongService._enrich_song``）；
+        - ``year``：``album.publishTime``（毫秒时间戳）——事实数据，优先于 LLM；
         - ``cover``：``album.picUrl``——后端 wy 音源没有 pic 实现且详情不带 picUrl，
           这是网易云歌曲封面的主要来源。
         """
@@ -224,9 +228,6 @@ class Enricher:
             if year:
                 detail["year"] = year
                 break
-        intro = _strip_html(str(album.get("description") or ""))
-        if intro:
-            detail["intro"] = _clean_text(intro, 160)
         cover = str(album.get("picUrl") or song.get("picUrl") or "").strip()
         if cover.startswith("http"):
             detail["cover"] = cover
@@ -343,33 +344,78 @@ class Enricher:
                 return comment, "wy"
         return None, ""
 
-    # ============ 4. 简介（LLM 兜底：歌手简介 / 歌曲简介） ============
+    # ============ 4. 卡片信息（LLM 一次调用：歌曲简介 + 歌手简介 + 年份兜底） ============
 
-    async def fetch_artist_bio(self, singer: str, umo: str | None = None) -> str | None:
-        """用当前对话模型生成一句歌手简介；LLM 不可用 / 不认识则返回 None。"""
-        singer = (singer or "").strip()
-        if not singer:
-            return None
-        prompt = (
-            f"请用一句话（不超过 60 字）介绍歌手「{singer}」：国籍或年代、音乐风格、"
-            "代表作或成就。不确定的信息不要编造；如果不知道这位歌手，只回复「暂无资料」。"
-        )
-        return await self._llm_one_liner(prompt, f"歌手：{singer}", umo)
+    async def fetch_card_info(
+        self,
+        track: Track,
+        *,
+        need_year: bool = False,
+        need_intro: bool = False,
+        need_bio: bool = False,
+        event=None,
+        umo: str | None = None,
+    ) -> dict:
+        """一次 LLM 调用同时获取歌曲简介 / 歌手简介 / 年份（按需）。
 
-    async def fetch_song_intro(self, track: Track, umo: str | None = None) -> str | None:
-        """用当前对话模型生成一句歌曲简介；LLM 不可用 / 不认识则返回 None。"""
+        返回 dict，只含成功拿到的键（``year`` / ``intro`` / ``artist_bio``）。
+        会话开启联网搜索时（插件注入的 ``llm_ask`` 走 agent 循环）LLM 会自行
+        搜索核实；确实查不到的字段返回时缺省，**绝不编造**。
+        """
+        if not (need_year or need_intro or need_bio):
+            return {}
         title = (track.name or "").strip()
         if not title:
-            return None
-        who = f"（{track.singer} 演唱）" if track.singer else ""
+            return {}
+        fields: list[str] = []
+        if need_year:
+            fields.append('"year": 发行年份（整数）或 null')
+        if need_intro:
+            fields.append('"intro": 一句话歌曲简介（不超过 60 字，侧重创作背景/年代/影响）或 null')
+        if need_bio:
+            fields.append('"artist_bio": 一句话歌手简介（不超过 60 字，风格/代表作/成就）或 null')
+        who = f" 演唱：{track.singer}" if track.singer else ""
+        album = f" 专辑：{track.album}" if track.album else ""
         prompt = (
-            f"请用一句话（不超过 60 字）介绍歌曲「{title}」{who}：创作背景、收录专辑、"
-            "发行年代或影响。不确定的信息不要编造；如果不知道这首歌，只回复「暂无资料」。"
+            "请只输出一个 JSON 对象（不要任何多余文字），格式：{ " + ", ".join(fields) + " }。\n"
+            f"歌曲：「{title}」{who}{album}。\n"
+            "所有信息必须真实；不确定就先联网搜索核实，确实查不到才用 null，不要编造。"
         )
-        return await self._llm_one_liner(prompt, f"歌曲：{title}", umo)
+        text = await self._ask_llm(prompt, event=event, umo=umo)
+        if not text:
+            return {}
+        data = _parse_llm_json(text)
+        out: dict = {}
+        if need_year:
+            try:
+                year = int(data.get("year"))
+            except (TypeError, ValueError):
+                year = 0
+            if 1900 <= year <= 2100:
+                out["year"] = year
+        for key in ("intro", "artist_bio"):
+            if not data.get(key):
+                continue
+            value = _clean_text(str(data[key]), BIO_MAX_CHARS).strip("\"'“”‘’`* ")
+            if value and not any(mark in value for mark in _BIO_NO_DATA):
+                out[key] = value
+        return out
 
-    async def _llm_one_liner(self, prompt: str, label: str, umo: str | None = None) -> str | None:
-        """调当前对话模型生成一句话简介（歌手 / 歌曲共用），失败返回 None。"""
+    async def _ask_llm(self, prompt: str, event=None, umo: str | None = None) -> str | None:
+        """调当前对话模型拿原始文本；失败返回 None。
+
+        优先走插件注入的 ``llm_ask``（会话开启联网搜索时挂搜索工具、由 agent
+        循环执行工具调用）；没注入则直调 provider（无工具）。
+        """
+        if self._llm_ask is not None:
+            try:
+                return await self._llm_ask(event, umo, prompt, _BIO_SYSTEM_PROMPT)
+            except asyncio.TimeoutError:
+                logger.info(f"[萌音点歌] LLM 生成超时（{self._llm_timeout}s）")
+                return None
+            except Exception as e:
+                logger.info(f"[萌音点歌] LLM 生成失败：{type(e).__name__}: {e}")
+                return None
         if self._provider_getter is None:
             return None
         try:
@@ -379,8 +425,8 @@ class Enricher:
             return None
         if provider is None:
             logger.info(
-                "[萌音点歌] 没有可用的对话模型，跳过简介生成"
-                "（请在 AstrBot 配置一个 Chat LLM 提供商，歌手简介/歌曲简介依赖它）"
+                "[萌音点歌] 没有可用的对话模型，跳过信息获取"
+                "（请在 AstrBot 配置一个 Chat LLM 提供商，歌曲简介/歌手简介依赖它）"
             )
             return None
         try:
@@ -389,18 +435,28 @@ class Enricher:
                 timeout=self._llm_timeout,
             )
         except asyncio.TimeoutError:
-            logger.info(f"[萌音点歌] 简介生成超时（{self._llm_timeout}s）：{label}")
+            logger.info(f"[萌音点歌] LLM 生成超时（{self._llm_timeout}s）")
             return None
         except Exception as e:
-            logger.info(f"[萌音点歌] 简介生成失败：{type(e).__name__}: {e}（{label}）")
+            logger.info(f"[萌音点歌] LLM 生成失败：{type(e).__name__}: {e}")
             return None
+        return str(getattr(resp, "completion_text", "") or "").strip() or None
 
-        text = _clean_text(str(getattr(resp, "completion_text", "") or ""), BIO_MAX_CHARS)
-        text = text.strip("\"'“”‘’`* ")
-        if not text or any(mark in text for mark in _BIO_NO_DATA):
-            logger.info(f"[萌音点歌] 简介无有效内容（{label}）")
-            return None
-        return text
+
+def _parse_llm_json(text: str) -> dict:
+    """从 LLM 输出里抠出 JSON 对象（容忍 ```json 围栏 / 前后废话）；失败返回空 dict。"""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _norm(text: str) -> str:

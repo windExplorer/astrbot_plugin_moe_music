@@ -102,7 +102,10 @@ class MoeMusicPlugin(Star):
         self.songlist_renderer = SonglistRenderer(font_path)
         self.song_card_renderer = SongCardRenderer(font_path)
         self.enricher = Enricher(
-            self.api, proxy=self.cfg.proxy, provider_getter=self._llm_provider_for
+            self.api,
+            proxy=self.cfg.proxy,
+            provider_getter=self._llm_provider_for,
+            llm_ask=self._llm_ask,
         )
         self.service = MoeMusicService(
             self.cfg,
@@ -155,6 +158,60 @@ class MoeMusicPlugin(Star):
             return providers[0] if providers else None
         except Exception as e:
             logger.debug(f"[萌音点歌] 获取可用对话模型列表失败：{type(e).__name__}: {e}")
+            return None
+
+    async def _llm_ask(self, event, umo: str | None, prompt: str, system_prompt: str) -> str | None:
+        """调当前对话模型生成文本（卡片信息获取用）。
+
+        会话开启联网搜索时（provider_settings.web_search）走框架的 agent 循环，
+        LLM 可以调用搜索工具核实资料——查不到的才允许返回 null，不编造。
+        没开联网搜索、或 agent 循环失败时退回直调模型。
+        """
+        if self.context is None:
+            return None
+        prov = await self._llm_provider_for(umo)
+        if prov is None:
+            return None
+        toolset = await self._web_search_toolset(event, umo)
+        if toolset is not None and umo:
+            try:
+                provider_id = await self.context.get_current_chat_provider_id(umo)
+                resp = await self.context.tool_loop_agent(
+                    event=event,
+                    chat_provider_id=provider_id,
+                    tools=toolset,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                )
+                text = str(getattr(resp, "completion_text", "") or "").strip()
+                if text:
+                    return text
+            except Exception as e:
+                logger.info(f"[萌音点歌] LLM（联网模式）生成失败，回退直调：{type(e).__name__}: {e}")
+        try:
+            resp = await prov.text_chat(prompt=prompt, system_prompt=system_prompt)
+            return str(getattr(resp, "completion_text", "") or "").strip() or None
+        except Exception as e:
+            logger.info(f"[萌音点歌] LLM 生成失败：{type(e).__name__}: {e}")
+            return None
+
+    async def _web_search_toolset(self, event, umo: str | None):
+        """按会话的 provider_settings 构建联网搜索工具集；未开启返回 None。
+
+        复用框架 ``_apply_web_search_tools``（与主对话流程同一套 Web Searcher
+        配置：tavily / bocha / brave / …），版本不兼容时静默降级为无工具直调。
+        """
+        if event is None or not umo or self.context is None:
+            return None
+        try:
+            from astrbot.core.astr_main_agent import _apply_web_search_tools
+            from astrbot.core.provider.entities import ProviderRequest
+
+            req = ProviderRequest(prompt="")
+            await _apply_web_search_tools(event, req, self.context)
+            return getattr(req, "func_tool", None)
+        except Exception as e:
+            logger.debug(f"[萌音点歌] 构建联网搜索工具失败：{type(e).__name__}: {e}")
             return None
 
     @staticmethod

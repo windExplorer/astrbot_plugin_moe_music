@@ -42,11 +42,11 @@
 | `share_send_modes` | 分享识别的发送方式与优先级（独立于 `send_modes`） | `record_link, text` |
 | `share_quality` | 分享识别取链音质（超 Key 上限自动收敛） | `320k` |
 | `song_card_enable` | 歌曲信息卡片（点歌后先发卡片再发音频） | `true` |
-| `song_card_year` | 卡片补充发行年份（网易云公开接口） | `true` |
-| `song_card_intro` | 卡片补充歌曲简介（LLM 生成为主，专辑文案占位兜底） | `true` |
-| `song_card_llm_sync` | 首次点歌时卡片等 LLM 预取简介/歌手简介再发（关 = 卡片永不等待） | `true` |
+| `song_card_llm_sync` | **用 LLM 获取卡片信息（总开关）**：一次调用同时取歌曲简介+歌手简介+年份兜底，会话开启联网搜索时自动搜索核实 | `true` |
+| `song_card_year` | 渲染：卡片显示发行年份（网易云接口优先，LLM 兜底） | `true` |
+| `song_card_intro` | 渲染：卡片显示歌曲简介 | `true` |
+| `song_card_artist_bio` | 渲染：卡片显示歌手简介（与歌曲简介同一次 LLM 调用生成） | `true` |
 | `song_card_comment` | 卡片补充热评第一条（网易云 / 酷我 / 酷狗，可能被限流） | `true` |
-| `song_card_artist_bio` | 卡片补充 AI 生成的歌手简介（缓存复用） | `true` |
 | `song_card_repeat_sec` | 同会话同一首歌不重复发卡片的窗口（秒，0 = 每次都发） | `300` |
 | `proxy` | 网络代理（可选） | 空 |
 | `enable_self_test` | 启用「点歌自检」命令 | `true` |

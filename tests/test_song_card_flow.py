@@ -48,24 +48,21 @@ class FakeEnricher:
         self,
         wy_id="186016",
         year=2014,
-        intro="测试歌曲简介",
         song_intro="测试歌曲简介",
         cover="http://h/wy-cover.jpg",
         comment=None,
         bio="测试歌手简介",
     ):
         self.wy_id = wy_id
-        self.year = year
-        self.intro = intro  # fetch_wy_detail 返回的专辑文案（占位）
+        self.year = year  # 网易云详情里的发行年份
         self.song_intro = song_intro  # LLM 生成的歌曲简介
         self.cover = cover
         self.comment = comment
-        self.bio = bio
+        self.bio = bio  # LLM 生成的歌手简介
         self.wy_calls = 0
         self.detail_calls = 0
-        self.intro_calls = 0
+        self.llm_calls = 0
         self.comment_calls = 0
-        self.bio_calls: list[str] = []
 
     async def resolve_wy_id(self, track):
         self.wy_calls += 1
@@ -76,19 +73,22 @@ class FakeEnricher:
         detail = {}
         if self.year:
             detail["year"] = self.year
-        if self.intro:
-            detail["intro"] = self.intro
         if self.cover:
             detail["cover"] = self.cover
         return detail
 
-    async def fetch_year(self, wy_id):
-        self.year_calls += 1
-        return self.year
-
-    async def fetch_song_intro(self, track, umo=None):
-        self.intro_calls += 1
-        return self.song_intro or None
+    async def fetch_card_info(
+        self, track, need_year=False, need_intro=False, need_bio=False, event=None, umo=None
+    ):
+        self.llm_calls += 1
+        out = {}
+        if need_year and self.year:
+            out["year"] = self.year
+        if need_intro and self.song_intro:
+            out["intro"] = self.song_intro
+        if need_bio and self.bio:
+            out["artist_bio"] = self.bio
+        return out
 
     async def fetch_hot_comment(self, wy_id):
         self.comment_calls += 1
@@ -100,10 +100,6 @@ class FakeEnricher:
         if not self.comment:
             return None, ""
         return self.comment, "wy"
-
-    async def fetch_artist_bio(self, singer, umo=None):
-        self.bio_calls.append(singer)
-        return self.bio
 
 
 def make_service(api, tmp_path, **cfg) -> tuple[MoeMusicService, FakeCardRenderer, FakeEnricher]:
@@ -190,30 +186,6 @@ class TestCardOrderAndSwitch:
             assert second.sent[1][0] == "chain" and not is_image(second.sent[1])
             assert renderer.calls[-1]["info"].year == 2014
 
-    async def test_llm_sync_off_card_never_waits(self, tmp_path):
-        """song_card_llm_sync 关：卡片永不等待——首次就发基础卡片，信息纯后台补。"""
-        async with FakeBackend(
-            search_result=[track_json(1)], extra_routes=await cover_routes()
-        ) as api:
-            service, renderer, _ = make_service(
-                api, tmp_path, song_card_repeat_sec=0, song_card_llm_sync=False
-            )
-            event = MockEvent()
-            await service.handle_song_request(event, "晴天", index_hint=1)
-            # 首次：先发基础卡片（此时增强信息还没补），后发歌
-            assert is_image(event.sent[0]), "不等 LLM 时应先发基础卡片"
-            assert renderer.calls[0]["info"].year == 0
-            assert event.sent[1][0] == "chain" and not is_image(event.sent[1])
-            await drain_background(service)
-            row = await service.info_cache.get_song("wy:1")
-            assert row["year"] == 2014  # 背景补齐照常进行
-            # 第二次：缓存里有啥发啥（完整卡片）
-            second = MockEvent()
-            await service.handle_song_request(second, "晴天", index_hint=1)
-            await drain_background(service)
-            assert renderer.calls[-1]["info"].year == 2014
-            assert renderer.calls[-1]["info"].intro == "测试歌曲简介"
-
     async def test_card_disabled(self, tmp_path):
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, renderer, _ = make_service(api, tmp_path, song_card_enable=False)
@@ -290,11 +262,13 @@ class TestBackgroundEnrich:
             await service.handle_song_request(event, "晴天", index_hint=1)
             await drain_background(service)
 
+            # 年份走网易云详情（事实数据）；简介+歌手简介合并为一次 LLM 调用
             assert enricher.detail_calls == 1
-            assert enricher.bio_calls == ["歌手1"]
+            assert enricher.llm_calls == 1
             row = await service.info_cache.get_song("wy:1")
             assert row["year"] == 2014
             assert row["intro"] == "测试歌曲简介"
+            assert row["intro_source"] == "llm"
             assert row["cover_url"] == "http://h/wy-cover.jpg"
             assert row["wy_id"] == "186016"
             artist = await service.info_cache.get_artist("歌手1")
@@ -332,40 +306,51 @@ class TestBackgroundEnrich:
             )
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
-            # 增强全关，但卡片封面仍需 wy 详情兜底（wy 音源无 pic 实现）
-            assert (enricher.wy_calls, enricher.bio_calls) == (0, [])
+            # 渲染开关全关，但卡片封面仍需 wy 详情兜底（wy 音源无 pic 实现）
+            assert enricher.wy_calls == 0
+            assert enricher.llm_calls == 0
             assert enricher.detail_calls == 1
 
-    async def test_intro_prefers_llm_over_album_text(self, tmp_path):
-        """简介以 LLM 生成的**歌曲**简介为主体：专辑文案（album）只是占位，会被升级替换。"""
+    async def test_llm_intro_stored_as_llm_source(self, tmp_path):
+        """歌曲简介来自 LLM（intro_source=llm），一次调用同时覆盖歌手简介。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, _, enricher = make_service(api, tmp_path)
-            enricher.intro = "这是专辑的介绍"  # fetch_wy_detail 返回的 album.description
-            enricher.song_intro = "这是歌曲的介绍"  # LLM 生成的歌曲简介
+            enricher.song_intro = "这是歌曲的介绍"
+            enricher.bio = "这是歌手的介绍"
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
             row = await service.info_cache.get_song("wy:1")
             assert row["intro"] == "这是歌曲的介绍"
             assert row["intro_source"] == "llm"
+            artist = await service.info_cache.get_artist("歌手1")
+            assert artist["bio"] == "这是歌手的介绍"
+            assert artist["source"] == "llm"
 
-    async def test_intro_falls_back_to_album_text_without_llm(self, tmp_path):
-        """LLM 不可用 / 不认识这首歌：保留专辑文案占位，不让简介栏空着。"""
+    async def test_llm_master_off_skips_llm_and_render(self, tmp_path):
+        """总开关关闭：年份/简介/歌手简介不获取也不渲染；热评照常走接口。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:
-            service, _, enricher = make_service(api, tmp_path)
-            enricher.intro = "这是专辑的介绍"
-            enricher.song_intro = None
-            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            service, renderer, enricher = make_service(
+                api, tmp_path, song_card_llm_sync=False, song_card_repeat_sec=0
+            )
+            enricher.comment = {"text": "好听", "user": "网友", "likes": 123}
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
             await drain_background(service)
+            info: CardInfo = renderer.calls[0]["info"]
+            assert info.year == 0 and info.intro == "" and info.artist_bio == ""
+            assert info.hot_comment == ""  # 卡片永不等待：首张是基础卡片
+            assert enricher.llm_calls == 0  # 没有任何 LLM 调用
             row = await service.info_cache.get_song("wy:1")
-            assert row["intro"] == "这是专辑的介绍"
-            assert row["intro_source"] == "album"
+            # 年份随封面详情顺带缓存（事实数据，不渲染进卡片）
+            assert row["year"] == 2014
+            assert row["hot_comment"] == "好听"  # 热评照常走接口并缓存
 
     async def test_failed_fetch_not_retried_on_next_play(self, tmp_path):
         """抓不到也要记时间戳：否则每次点这首歌都会重打一遍外部接口。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, _, enricher = make_service(api, tmp_path)
             enricher.year = None
-            enricher.intro = None
+            enricher.song_intro = None
             enricher.cover = None
             enricher.bio = None
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
@@ -376,8 +361,7 @@ class TestBackgroundEnrich:
             await drain_background(service)
             # 第一次：卡片封面 1 次 + 补齐 1 次；第二次全部被负缓存拦下
             assert enricher.detail_calls == 2
-            assert enricher.intro_calls == 1  # LLM 简介同样只试一次
-            assert enricher.bio_calls == ["歌手1"]
+            assert enricher.llm_calls == 1  # LLM 同样只试一次
 
 
 class TestRecentTrackQuote:
