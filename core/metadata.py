@@ -1,6 +1,8 @@
 """音频元数据嵌入：把标题 / 歌手 / 专辑 / 封面 / 歌词写进音频文件。
 
 - 支持 MP3（ID3v2）、FLAC、MP4/M4A 三类主流格式，其余格式跳过（仅记日志）；
+- **以文件内容判定容器**：扩展名是按请求音质推断的，上游可能给别的容器，
+  按扩展名分派写入器会直接报 `FLACNoHeaderError: is not a valid FLAC file`；
 - 纯同步实现（mutagen），由调用方放线程池执行；
 - 任何失败由调用方兜底：只记日志，绝不阻断文件发送。
 """
@@ -9,6 +11,8 @@ import traceback
 from pathlib import Path
 
 from astrbot.api import logger
+
+from .audio_probe import sniff_audio_ext
 
 try:
     from mutagen.flac import FLAC, Picture
@@ -98,6 +102,18 @@ _EMBEDDERS = {
     ".mp4": _embed_mp4,  # 音频型 m4a 常被误命名为 mp4
 }
 
+# 判定容器时读取的文件头长度（要覆盖「ID3 标签 + fLaC」这类形态）
+_HEAD_BYTES = 64
+
+
+def _read_head(path: Path, size: int = _HEAD_BYTES) -> bytes:
+    """读文件头（失败返回空字节）。"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(size)
+    except OSError:
+        return b""
+
 
 def embed_metadata(
     path: Path,
@@ -110,8 +126,11 @@ def embed_metadata(
 ) -> bool:
     """向音频文件写入标签，返回是否成功。
 
+    容器以**文件内容**为准（扩展名只是预期）：真实容器与扩展名不一致时按真实容器
+    选择写入器并告警；真实容器不在支持列表里则跳过嵌入（不拿错写入器硬写）。
+
     Args:
-        path: 音频文件路径（按扩展名分派写入器）。
+        path: 音频文件路径。
         title / artist / album: 基本标签。
         cover_bytes: 封面图片字节（None 跳过封面）。
         lyrics: 非同步歌词文本（None 跳过歌词）。
@@ -120,9 +139,16 @@ def embed_metadata(
         logger.warning("[萌音点歌] mutagen 未安装，跳过元数据嵌入（请在插件环境安装 mutagen）")
         return False
 
-    embedder = _EMBEDDERS.get(path.suffix.lower())
+    expected = path.suffix.lower()
+    real = sniff_audio_ext(_read_head(path))
+    if real and real != expected:
+        logger.warning(
+            f"[萌音点歌] 文件容器与扩展名不符：{path.name} 实际为 {real}，按实际容器写入标签"
+        )
+    target = real or expected
+    embedder = _EMBEDDERS.get(target)
     if embedder is None:
-        logger.debug(f"[萌音点歌] 格式 {path.suffix} 暂不支持元数据嵌入，跳过")
+        logger.debug(f"[萌音点歌] 格式 {target} 暂不支持元数据嵌入，跳过（{path.name}）")
         return False
 
     try:
@@ -130,5 +156,13 @@ def embed_metadata(
         logger.debug(f"[萌音点歌] 元数据嵌入完成：{path.name}")
         return True
     except Exception:
-        logger.warning(f"[萌音点歌] 元数据嵌入失败（文件照常发送）：{path.name}\n{traceback.format_exc()}")
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = -1
+        logger.warning(
+            f"[萌音点歌] 元数据嵌入失败（文件照常发送）：{path.name}"
+            f"（容器判定为 {target}，{size} 字节，文件头 {_read_head(path, 16).hex()}）\n"
+            f"{traceback.format_exc()}"
+        )
         return False

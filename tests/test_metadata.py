@@ -125,3 +125,45 @@ class TestUnsupportedAndErrors:
         p.write_bytes(b"garbage")
         # ID3 挂载垃圾数据不抛异常（写入可能成功或失败，但必须不炸）
         embed_metadata(p, title="a", artist="b")
+
+
+class TestContainerFromContent:
+    """容器以文件内容为准：扩展名是按请求音质推断的，可能不准。
+
+    线上报错：`flac` 链接回的实际是别的容器，按 .flac 分派写入器直接抛
+    `FLACNoHeaderError: is not a valid FLAC file`。
+    """
+
+    def test_mp3_content_in_flac_named_file(self, tmp_path: Path):
+        p = tmp_path / "song.flac"
+        p.write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 512)
+        ok = embed_metadata(p, title="晴天", artist="周杰伦", album="叶惠美", lyrics=LYRICS)
+        assert ok  # 按真实容器（mp3）写入，而不是按 .flac 硬写
+        from mutagen.id3 import ID3
+
+        tags = ID3(str(p))
+        assert tags.getall("TIT2")[0].text == ["晴天"]
+        assert "故事的小黄花" in tags.getall("USLT")[0].text
+
+    def test_flac_content_in_mp3_named_file(self, tmp_path: Path):
+        from mutagen.flac import FLAC
+
+        p = tmp_path / "song.mp3"
+        streaminfo = (
+            b"\x10\x00" + b"\x10\x00" + b"\x00" * 6 + bytes([0x0A, 0xC4, 0x42]) + b"\x00" * 5 + b"\x00" * 16
+        )
+        p.write_bytes(b"fLaC" + bytes([0x80, 0, 0, 34]) + streaminfo)
+        assert embed_metadata(p, title="晴天", artist="周杰伦") is True
+        assert FLAC(str(p))["title"] == ["晴天"]
+
+    def test_unrecognizable_content_skipped(self, tmp_path: Path):
+        p = tmp_path / "song.flac"
+        p.write_bytes(b"<!DOCTYPE html><html>upstream error</html>")
+        # 认不出容器：保留原扩展名尝试（这里必然失败），但绝不能抛异常
+        assert embed_metadata(p, title="晴天", artist="周杰伦") is False
+
+    def test_wav_content_skipped_without_error(self, tmp_path: Path):
+        """真实容器不在支持列表（wav/ape 等）时跳过嵌入，不拿错写入器硬写。"""
+        p = tmp_path / "song.flac"
+        p.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 40)
+        assert embed_metadata(p, title="晴天", artist="周杰伦") is False

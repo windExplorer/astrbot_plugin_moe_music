@@ -325,3 +325,75 @@ class TestPublicize:
         client = self._client("https://example.com/music-api")
         out = client.publicize("http://127.0.0.1:3080/api/temp/tok")
         assert out == "https://example.com/music-api/api/temp/tok"
+
+
+@pytest.fixture()
+async def binary_server():
+    """按需返回指定字节的临时下载服务（下载链路专用）。"""
+    runners: list[web.AppRunner] = []
+
+    async def start(body: bytes, content_type: str) -> str:
+        app = web.Application()
+
+        async def handler(request: web.Request) -> web.Response:
+            return web.Response(body=body, content_type=content_type)
+
+        app.router.add_get("/api/temp/{token}", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        runners.append(runner)
+        port = site._server.sockets[0].getsockname()[1]
+        return f"http://127.0.0.1:{port}/api/temp/tok"
+
+    yield start
+    for runner in runners:
+        await runner.cleanup()
+
+
+class TestDownloadContainer:
+    """下载后按文件内容校正扩展名（线上：flac 链接实际回了别的容器）。
+
+    扩展名只代表「预期」格式，是指按音质推断出来的；内容才决定写入器与真实格式。
+    """
+
+    MP3_BYTES = b"\xff\xfb\x90\x00" + b"\x00" * 512
+    FLAC_BYTES = b"fLaC" + bytes([0x80, 0, 0, 34]) + b"\x00" * 40
+
+    def _client(self) -> MusicApiClient:
+        # 下载走绝对 URL，客户端本身的后端地址无关紧要
+        return make_client("http://127.0.0.1:1")
+
+    async def test_renames_when_container_differs(self, tmp_path, binary_server):
+        """请求 flac（dest=song.flac）但内容是 mp3 → 落盘为 song.mp3。
+
+        否则 mutagen 会按 .flac 分派写入器并抛 FLACNoHeaderError。
+        """
+        url = await binary_server(self.MP3_BYTES, "audio/mpeg")
+        dest = tmp_path / "song.flac"
+        got = await self._client().download(url, dest)
+        assert got.name == "song.mp3"
+        assert got.read_bytes() == self.MP3_BYTES
+        assert not dest.exists()
+
+    async def test_keeps_extension_when_container_matches(self, tmp_path, binary_server):
+        url = await binary_server(self.FLAC_BYTES, "audio/flac")
+        dest = tmp_path / "song.flac"
+        assert await self._client().download(url, dest) == dest
+
+    async def test_unknown_container_keeps_expected_ext(self, tmp_path, binary_server):
+        """错误页 / 加密内容：认不出容器就保留预期扩展名（并告警），文件照常返回。"""
+        url = await binary_server(b"<!DOCTYPE html><html>err</html>", "text/html")
+        dest = tmp_path / "song.flac"
+        got = await self._client().download(url, dest)
+        assert got == dest
+        assert got.read_bytes().startswith(b"<!DOCTYPE")
+
+    async def test_empty_body_raises(self, tmp_path, binary_server):
+        """0 字节内容必然是坏的：直接判下载失败，不发空文件给用户。"""
+        url = await binary_server(b"", "audio/flac")
+        dest = tmp_path / "song.flac"
+        with pytest.raises(ApiError):
+            await self._client().download(url, dest)
+        assert not dest.exists()

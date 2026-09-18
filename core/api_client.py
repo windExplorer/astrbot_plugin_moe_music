@@ -19,6 +19,7 @@ import aiofiles
 import aiohttp
 from astrbot.api import logger
 
+from .audio_probe import sniff_audio_ext
 from .model import Track, quality_rank
 
 # 业务错误码 -> 用户侧温馨提示（不含任何技术细节）
@@ -56,7 +57,11 @@ class ApiError(Exception):
 
 
 def guess_audio_ext(quality: str, content_type: str | None = None) -> str:
-    """按音质档位 / 响应 Content-Type 推断音频扩展名。"""
+    """按音质档位 / 响应 Content-Type 推断音频扩展名（**预期**格式，非真实格式）。
+
+    只用于下载前的落盘命名与链接模式的展示文件名；下载完成后必须用
+    :func:`core.audio_probe.sniff_audio_ext` 按内容校正（上游可能给别的容器）。
+    """
     ct = (content_type or "").split(";")[0].strip().lower()
     if "flac" in ct:
         return ".flac"
@@ -334,24 +339,38 @@ class MusicApiClient:
         return await self._request("GET", f"/music/{music_id}/url", params=params)
 
     async def download(self, url: str, dest: Path) -> Path:
-        """流式下载文件（临时链接 / 封面）到指定路径。
+        """流式下载文件（临时链接 / 封面）到指定路径，返回**实际**文件路径。
+
+        ``dest`` 的扩展名是按请求音质推断的「预期」格式，上游不一定真给（实测
+        QQ音乐无损链接会回 m4a）。因此下载完成后按文件头校正扩展名：真实容器与
+        预期不一致时改名并在日志里说明，避免 mutagen 用错写入器（曾报
+        ``FLACNoHeaderError: is not a valid FLAC file``）、也避免把错格式的文件
+        按错名字发给用户。
 
         Args:
             url: 下载地址（后端临时链接或封面 URL）。
-            dest: 目标路径（含扩展名，调用方用 :func:`guess_audio_ext` 预先确定）。
+            dest: 目标路径（含预期扩展名，由 :func:`guess_audio_ext` 给出）。
+
+        Returns:
+            Path: 实际落盘的路径（扩展名可能已被校正）。
         """
         if urlparse(url).scheme not in ("http", "https"):
             raise ApiError(4040, f"非法下载地址 scheme: {urlparse(url).scheme}", network=True)
         session = await self._ensure_session()
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = dest.with_suffix(dest.suffix + ".part")
+        head = b""
+        content_type = ""
         try:
             async with session.get(url, proxy=self._proxy) as resp:
                 if resp.status != 200:
                     logger.error(f"[萌音点歌] 下载失败：HTTP {resp.status}（文件 {dest.name}）")
                     raise ApiError(4040, f"下载失败：HTTP {resp.status}", network=True)
+                content_type = resp.headers.get("Content-Type", "") or ""
                 async with aiofiles.open(tmp_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(64 * 1024):
+                        if len(head) < 64:  # 文件头足够识别容器（含 ID3 前缀的更长形态）
+                            head += chunk[: 64 - len(head)]
                         await f.write(chunk)
         except aiohttp.ClientError as e:
             logger.error(f"[萌音点歌] 下载网络异常：{type(e).__name__}: {e}")
@@ -360,8 +379,34 @@ class MusicApiClient:
             logger.error(f"[萌音点歌] 下载超时：{dest.name}")
             raise ApiError(-1, "download timeout", network=True) from e
 
-        tmp_path.replace(dest)
-        logger.debug(f"[萌音点歌] 下载完成：{dest.name}（{dest.stat().st_size} 字节）")
+        size = tmp_path.stat().st_size
+        if size == 0:
+            tmp_path.unlink(missing_ok=True)
+            logger.error(f"[萌音点歌] 下载内容为空（0 字节）：{dest.name}")
+            raise ApiError(4040, "下载内容为空", network=True)
+
+        final = self._apply_real_ext(dest, tmp_path, head, content_type, size)
+        tmp_path.replace(final)
+        logger.debug(f"[萌音点歌] 下载完成：{final.name}（{size} 字节）")
+        return final
+
+    @staticmethod
+    def _apply_real_ext(dest: Path, tmp_path: Path, head: bytes, content_type: str, size: int) -> Path:
+        """按文件头校正扩展名；认不出容器时保留预期扩展名并告警。"""
+        real_ext = sniff_audio_ext(head, content_type)
+        expected = dest.suffix.lower()
+        if real_ext is None:
+            logger.warning(
+                f"[萌音点歌] 无法识别下载内容的音频容器：Content-Type={content_type or '无'}，"
+                f"{size} 字节，文件头 {head[:16].hex()}（按 {dest.name} 保存，可能无法播放）"
+            )
+            return dest
+        if real_ext != expected:
+            logger.warning(
+                f"[萌音点歌] 下载容器与预期不一致：预期 {expected or '无'}，实际 {real_ext}"
+                f"（Content-Type={content_type or '无'}，{size} 字节），已按实际格式保存"
+            )
+            return dest.with_suffix(real_ext)
         return dest
 
     async def download_bytes(self, url: str, max_bytes: int = 5 * 1024 * 1024) -> bytes:
