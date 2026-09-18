@@ -119,6 +119,7 @@ class MoeMusicService:
         card_renderer=None,
         info_cache: InfoCache | None = None,
         enricher=None,
+        out_of_band_sender=None,
     ):
         self.cfg = config
         self.api = api
@@ -132,6 +133,9 @@ class MoeMusicService:
         self.card_renderer = card_renderer
         self.info_cache = info_cache
         self.enricher = enricher
+        # 会话外主动发送（``async def (umo, chain) -> bool``）：信息卡片补发走这里，
+        # 不依赖事件对象——补发发生在流水线结束之后
+        self._out_of_band_sender = out_of_band_sender
         # 会话 -> 最近一次候选列表「能否被撤回」的结论（撤回失败时输出，免翻旧日志）
         self._candidate_diag: dict[str, str] = {}
         # (会话, 曲目) -> 上次发卡片时间：同会话短期重发同一首时跳过卡片，防刷屏
@@ -793,6 +797,9 @@ class MoeMusicService:
             self._remember_track(event, track)
             umo = getattr(event, "unified_msg_origin", None)
             if deferred_card:
+                logger.info(
+                    f"[萌音点歌] 卡片信息未备齐：歌曲先发，补齐后补发完整卡片：《{track.display}》"
+                )
                 self._schedule_deferred_card(event, track, delivery, umo)
             else:
                 # 增强信息（年份/简介/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
@@ -1015,12 +1022,25 @@ class MoeMusicService:
         delivery: DeliveryOptions | None,
         umo: str | None,
     ) -> None:
-        """补齐年份 / 简介 / 热评 / 歌手简介，然后渲染并发送卡片（失败只记日志）。"""
+        """补齐年份 / 简介 / 热评 / 歌手简介，然后渲染并发送卡片（失败只记日志）。
+
+        发送优先走 ``out_of_band_sender``（框架 ``context.send_message``，按
+        unified_msg_origin 路由）——补发发生在流水线结束之后，事件对象可能已经
+        不可用；没有回调（测试/降级）再回退 ``event.send``。
+        """
         await self._enrich_track(track, umo)
         try:
             card = await self._prepare_song_card(event, track, delivery)
-            if card is not None:
-                await event.send(event.chain_result([Image.fromBytes(card)]))
+            if card is None:
+                logger.warning(f"[萌音点歌] 补发信息卡片：渲染失败（已跳过）：《{track.display}》")
+                return
+            seg = Image.fromBytes(card)
+            sent = False
+            if self._out_of_band_sender is not None and umo:
+                sent = await self._out_of_band_sender(umo, [seg])
+            if not sent:
+                await event.send(event.chain_result([seg]))
+            logger.info(f"[萌音点歌] 已补发信息卡片：《{track.display}》")
         except asyncio.CancelledError:
             raise
         except Exception:

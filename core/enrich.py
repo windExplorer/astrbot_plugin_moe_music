@@ -378,7 +378,10 @@ class Enricher:
             logger.debug(f"[萌音点歌] 获取 LLM Provider 失败：{type(e).__name__}: {e}")
             return None
         if provider is None:
-            logger.debug("[萌音点歌] 没有可用的对话模型，跳过简介生成")
+            logger.info(
+                "[萌音点歌] 没有可用的对话模型，跳过简介生成"
+                "（请在 AstrBot 配置一个 Chat LLM 提供商，歌手简介/歌曲简介依赖它）"
+            )
             return None
         try:
             resp = await asyncio.wait_for(

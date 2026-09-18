@@ -116,7 +116,24 @@ class MoeMusicPlugin(Star):
             card_renderer=self.song_card_renderer,
             info_cache=self.info_cache,
             enricher=self.enricher,
+            out_of_band_sender=self._send_to_session,
         )
+
+    async def _send_to_session(self, umo: str, chain: list) -> bool:
+        """按 unified_msg_origin 会话外主动发消息（信息卡片补发用）。
+
+        补发发生在消息流水线结束之后，事件对象可能已不可用，走框架的
+        ``context.send_message`` 路由到对应平台。返回是否发送成功。
+        """
+        if self.context is None:
+            return False
+        try:
+            from astrbot.core.message.message_event_result import MessageChain
+
+            return bool(await self.context.send_message(umo, MessageChain(chain=chain)))
+        except Exception as e:
+            logger.warning(f"[萌音点歌] 会话外消息发送失败：{type(e).__name__}: {e}")
+            return False
 
     async def _llm_provider_for(self, umo: str | None = None):
         """取可用的对话模型（简介生成用）；没有可用模型时返回 None。
