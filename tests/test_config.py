@@ -167,7 +167,9 @@ class TestFileCommandAliases:
     """「点歌文件」指令别名与点歌别名同构（点歌名 + 文件后缀）。"""
 
     def test_aliases_are_song_aliases_plus_suffix(self):
-        assert FILE_COMMAND_ALIASES == {f"{name}文件" for name in SONG_COMMAND_ALIASES}
+        assert FILE_COMMAND_ALIASES == {
+            f"{name}文件" for name in SONG_COMMAND_ALIASES
+        } | {"下载"}  # 「下载」：点歌文件的短别名（配合引用分享使用）
 
     def test_platform_variants_present(self):
         # 「点歌文件」是主命令名本身，不在 alias 集合里（与「点歌」同理）
