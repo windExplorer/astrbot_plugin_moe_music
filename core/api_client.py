@@ -309,6 +309,21 @@ class MusicApiClient:
             raise
         return data.get("url") or None
 
+    async def music_info(self, music_id: str) -> dict | None:
+        """按曲目 id 取详情（``/music/:id/info``），不存在返回 None。
+
+        分享识别用：分享链接里带的平台原生 id（QQ音乐 songmid / 网易云数字 id /
+        酷狗 hash）能直接定位到**那一首**，比「歌名 + 歌手」搜索更准——
+        同名翻唱、现场版、合集都不会选错。取不到时调用方退化为搜索。
+        """
+        try:
+            data = await self._request("GET", f"/music/{music_id}/info")
+        except ApiError as e:
+            if e.code == 4040:
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
     async def play_url(self, music_id: str, quality: str | None = None) -> dict:
         """取播放链接（本站临时链接）。4220（音质超限）由调用方收敛重取。
 

@@ -55,8 +55,9 @@ SELECTION_NAMES = {
     "single": "单曲直发",
     "picked": "回复序号",
     "llm": "AI 点歌",
+    "share": "分享识别",
 }
-TRIGGER_NAMES = {"command": "命令", "llm_tool": "AI"}
+TRIGGER_NAMES = {"command": "命令", "llm_tool": "AI", "share": "分享识别"}
 SOURCE_NAMES = {
     "kw": "酷我",
     "kg": "酷狗",
@@ -106,6 +107,9 @@ _EDITABLE_KEYS = {
     "file_quality",
     "file_embed_metadata",
     "recall_candidate",
+    "share_auto_play",
+    "share_send_modes",
+    "share_quality",
     "proxy",
     "enable_self_test",
     "whitelist_groups",

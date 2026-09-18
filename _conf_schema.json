@@ -144,6 +144,33 @@
         "type": "bool",
         "default": true
     },
+    "share_auto_play": {
+        "description": "分享卡片自动识别（默认关闭）",
+        "hint": "开启后：群里有人分享 QQ音乐 / 网易云音乐 / 酷狗音乐 / 酷我音乐 的歌曲卡片或链接时，自动识别那首歌并发送（默认发语音，见下方发送方式）。默认关闭，需要显式开启——自动发消息属于「机器人主动说话」。白/黑名单与点歌一致，管理员不受限制；认不出的卡片不会触发，也不影响 AI 正常聊天。注意：本开关只控制「自动」发送，引用分享再发「点歌 / 点歌文件」是用户明确操作，关着也照常可用",
+        "type": "bool",
+        "default": false
+    },
+    "share_send_modes": {
+        "description": "分享发送方式与优先级",
+        "hint": "分享识别之后的发送方式，按顺序尝试、失败自动降级，与普通点歌的「发送方式与优先级」相互独立。默认「语音链接 → 文本链接」：语音会被 QQ 强制转成 24kHz 单声道 silk 语音编码，音乐会明显模糊（协议限制）；想要无损请换成 file_local（本地文件）",
+        "type": "list",
+        "options": [
+            "card(音乐卡片)",
+            "record_link(语音链接)",
+            "record_local(本地语音)",
+            "file_link(文件链接)",
+            "file_local(本地文件)",
+            "text(文本链接)"
+        ],
+        "default": ["record_link(语音链接)", "text(文本链接)"]
+    },
+    "share_quality": {
+        "description": "分享识别音质",
+        "hint": "分享识别取播放链接时使用的音质，与普通点歌的默认音质相互独立；超过 API Key 上限时自动收敛到允许的最高音质。语音会被 QQ 转码，320k 通常足够",
+        "type": "string",
+        "options": ["128k", "192k", "320k", "flac", "flac24bit", "wav", "ape", "atmos", "dolby", "master"],
+        "default": "320k"
+    },
     "proxy": {
         "description": "网络代理",
         "hint": "访问音乐后端使用的代理，如 http://127.0.0.1:7890，留空直连",

@@ -65,11 +65,19 @@ def _install_astrbot_stubs():
         def fromBytes(data):
             return Image(file=data)
 
+    class Json(_Comp):
+        pass
+
+    class Reply(_Comp):
+        pass
+
     comp_mod = types.ModuleType("astrbot.api.message_components")
     comp_mod.Plain = Plain
     comp_mod.Record = Record
     comp_mod.File = File
     comp_mod.Image = Image
+    comp_mod.Json = Json
+    comp_mod.Reply = Reply
 
     # ---- event / filter ----
     class AstrMessageEvent:

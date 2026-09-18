@@ -90,6 +90,23 @@ def _strip_option_label(option: str) -> str:
     return option.strip().split("(", 1)[0].strip().lower()
 
 
+def parse_send_modes(value, default: list[str], key: str = "send_modes") -> list[str]:
+    """发送方式列表归一化：面板选项可能带 "(说明)" 后缀，逐项归一化并去重保序。
+
+    配置为空（或全是非法项）时回退到 ``default``——发送方式为空会让「所有发送模式
+    都失败」，点歌直接发不出去，必须兜底。
+    """
+    modes: list[str] = []
+    for item in value or []:
+        mode = _strip_option_label(str(item))
+        if mode in SEND_MODES and mode not in modes:
+            modes.append(mode)
+    if not modes:
+        logger.warning(f"[萌音点歌] {key} 配置为空或非法，使用默认降级顺序：{default}")
+        return list(default)
+    return modes
+
+
 @dataclass(slots=True)
 class PluginConfig:
     """AstrBotConfig 的强类型视图。"""
@@ -113,6 +130,11 @@ class PluginConfig:
     file_quality: str = "flac"
     file_embed_metadata: bool = True
     recall_candidate: bool = True  # 选歌结束后撤回候选列表（仅 aiocqhttp 可用）
+    # 分享识别：群里有人分享 QQ音乐/网易云/酷狗/酷我的歌曲卡片或链接时自动点歌
+    # 默认关闭（自动发消息属于「机器人主动说话」，由使用者显式开启）
+    share_auto_play: bool = False
+    share_send_modes: list[str] = field(default_factory=lambda: ["record_link", "text"])
+    share_quality: str = "320k"  # 分享识别取链音质（语音会被 QQ 转码，320k 通常足够）
     proxy: str = ""
     enable_self_test: bool = True
     # 访问控制：白名单优先于黑名单；两者都为空时不限制
@@ -135,6 +157,7 @@ class PluginConfig:
 
         default_quality = _strip_option_label(str(config.get("default_quality", "320k") or "320k"))
         file_quality = _strip_option_label(str(config.get("file_quality", "flac") or "flac"))
+        share_quality = _strip_option_label(str(config.get("share_quality", "320k") or "320k"))
 
         try:
             song_limit = int(config.get("song_limit", 5))
@@ -143,15 +166,13 @@ class PluginConfig:
         song_limit = max(1, min(20, song_limit))
 
         # send_modes：面板保存的选项可能带 "(说明)" 后缀，逐项归一化并去重保序
-        raw_modes = config.get("send_modes", []) or []
-        send_modes: list[str] = []
-        for item in raw_modes:
-            mode = _strip_option_label(str(item))
-            if mode in SEND_MODES and mode not in send_modes:
-                send_modes.append(mode)
-        if not send_modes:
-            logger.warning("[萌音点歌] send_modes 配置为空，使用默认降级顺序")
-            send_modes = ["card", "record_link", "file_local", "text"]
+        send_modes = parse_send_modes(
+            config.get("send_modes", []), ["card", "record_link", "file_local", "text"]
+        )
+        # 分享识别是「自动说话」，默认走语音；发送方式独立配置，与普通点歌互不影响
+        share_send_modes = parse_send_modes(
+            config.get("share_send_modes", []), ["record_link", "text"], "share_send_modes"
+        )
 
         def _int_opt(key: str, default: int, lo: int, hi: int) -> int:
             try:
@@ -188,6 +209,9 @@ class PluginConfig:
             file_quality=file_quality,
             file_embed_metadata=bool(config.get("file_embed_metadata", True)),
             recall_candidate=bool(config.get("recall_candidate", True)),
+            share_auto_play=bool(config.get("share_auto_play", False)),
+            share_send_modes=share_send_modes,
+            share_quality=share_quality,
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),
             whitelist_groups=_str_list("whitelist_groups"),

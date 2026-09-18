@@ -42,6 +42,10 @@ const GROUPS: Array<{ title: string; keys: string[] }> = [
     ],
   },
   { title: "文件下载（点歌文件 指令）", keys: ["file_quality", "file_embed_metadata"] },
+  {
+    title: "分享识别（QQ音乐 / 网易云 / 酷狗 / 酷我）",
+    keys: ["share_auto_play", "share_send_modes", "share_quality"],
+  },
   { title: "队列", keys: ["queue_concurrency", "queue_max_pending"] },
   { title: "访问控制（白/黑名单，白名单优先）", keys: ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"] },
   { title: "其他", keys: ["enable_self_test"] },

@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import re
 import time
 import traceback
 
@@ -26,8 +27,53 @@ from .lyrics_render import LyricsRenderer
 from .model import Track
 from .onebot import call_action_of, message_id_payload, send_message_via_onebot
 from .sender import FILE_ONLY_MODES, DeliveryOptions, SongSender, send_lyrics_image
+from .share import ShareInfo
 from .songlist_render import SonglistRenderer
 from .storage import RecordStore
+
+# 归一化歌名/歌手时的噪声字符（空格、标点、括号说明等，含全角）
+_MATCH_NOISE_RE = re.compile(r"[\s\-_/·、,，.。!！?？'\"“”‘’()（）\[\]【】]+")
+
+
+def _norm_text(text: str) -> str:
+    """歌词/歌曲名归一化：小写 + 去空格与标点，用于分享卡片与搜索结果的相似度比较。"""
+    return _MATCH_NOISE_RE.sub("", (text or "").lower())
+
+
+def pick_best_track(
+    tracks: list[Track], title: str, singer: str = "", platform: str = ""
+) -> Track | None:
+    """从搜索结果里挑出最像分享卡片的那一首（歌名 > 歌手 > 同平台）。
+
+    分享卡片自带歌名与歌手，聚合搜索下直接取第 1 条容易选到翻唱/现场版/合集；
+    这里按文本重合度打分，最高分为 0（完全不像）时退回第 1 条——搜索关键词本身
+    就是「歌名 歌手」，搜出来的第 1 条即搜索引擎的相关度判断。
+    """
+    if not tracks:
+        return None
+    want_title, want_singer = _norm_text(title), _norm_text(singer)
+    best: Track | None = None
+    best_score = -1
+    for track in tracks:
+        name, artist = _norm_text(track.name), _norm_text(track.singer)
+        score = 0
+        if want_title:
+            if name == want_title:
+                score += 100
+            elif want_title in name or name in want_title:
+                score += 60
+        if want_singer and artist:
+            if want_singer == artist:
+                score += 40
+            elif want_singer in artist or artist in want_singer:
+                score += 20
+        if platform and track.source == platform:
+            score += 10
+        if score > best_score:
+            best, best_score = track, score
+    if best_score <= 0:
+        logger.info("[萌音点歌] 分享搜索结果与卡片信息无明显重合，取搜索第 1 条")
+    return best
 
 
 class _UserSessionFilter(SessionFilter):
@@ -153,8 +199,9 @@ class MoeMusicService:
         trigger_type: str,
         queue_wait_ms: int = 0,
         search_quality: str | None = None,
-    ) -> list[Track] | None:
-        """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 None。
+        send_hint: bool = True,
+    ) -> tuple[list[Track] | None, int]:
+        """搜索 + 写搜索记录（成败均记）；失败时发送提示并返回 ``(None, 耗时)``。
 
         后端音源被连续请求短暂冷却时会返回空结果（实测存在），因此空结果
         间隔 3 秒自动重试一次，仍为空才判定无结果。
@@ -162,6 +209,8 @@ class MoeMusicService:
         Args:
             search_quality: 显式传给搜索接口的音质（None = 普通点歌音质）。会先按本
                 Key 上限收敛——后端对超出上限的显式音质直接 422，不收敛会导致搜索失败。
+            send_hint: False 表示失败时不发通用提示（分享识别用自己的文案，避免
+                「换个关键词试试吧」这种与分享场景对不上的提示）。
         """
         started = time.monotonic()
         tracks = None
@@ -188,7 +237,8 @@ class MoeMusicService:
                         queue_wait_ms=queue_wait_ms,
                         **ctx,
                     )
-                await event.send(event.plain_result(e.user_hint))
+                if send_hint:
+                    await event.send(event.plain_result(e.user_hint))
                 return None, duration_ms
             if tracks or attempt == 2:
                 break
@@ -223,6 +273,127 @@ class MoeMusicService:
             embed_metadata=self.cfg.file_embed_metadata,
             fail_hint="文件下载失败了，换一首或稍后再试试吧～",
         )
+
+    # ============ 分享识别（QQ音乐 / 网易云 / 酷狗 / 酷我） ============
+
+    SHARE_NOT_FOUND_HINT = "识别到分享的{label}，但没能在音源里找到，稍后再试试吧～"
+
+    def _share_delivery(self) -> DeliveryOptions:
+        """分享自动点歌的发送策略：默认语音，音质与发送方式独立配置。"""
+        return DeliveryOptions(
+            quality=self.cfg.share_quality,
+            modes=list(self.cfg.share_send_modes),
+            embed_metadata=self.cfg.embed_metadata,
+            fail_hint="识别到分享，但这首歌暂时发不出来，稍后再试试吧～",
+        )
+
+    async def handle_share_request(
+        self,
+        event: AstrMessageEvent,
+        share: ShareInfo,
+        *,
+        file_mode: bool = False,
+        command: str = "分享识别",
+    ) -> bool:
+        """把识别出的分享变成歌曲：解析曲目 → 发送（默认语音 / 可选文件）。
+
+        与点歌指令的差别：失败不展示候选列表让人选——分享是「自动说话」，
+        弹一堆候选项比直接说没找到更打扰人。
+
+        Args:
+            file_mode: True（引用分享 + 「点歌文件」）时下载文件本体，音质与嵌入
+                开关走 ``file_*`` 配置，与指令路径完全一致。
+            command: 记录用的触发词（分享识别 / 具体的点歌指令名）。
+
+        Returns:
+            bool: 是否已成功发送。
+        """
+        ctx = await self._collect_context(event)
+        if not await self._check_access(event, ctx):
+            return False
+
+        delivery = self._file_delivery() if file_mode else self._share_delivery()
+        flow_start = time.monotonic()
+        logger.info(
+            f"[萌音点歌] 识别到分享：{share.platform_name}《{share.display}》"
+            f"（id={share.track_id or '<无>'} 来源={share.origin} 发送={delivery.modes}）"
+        )
+
+        async def _resolve_job(queue_wait_ms=0):
+            return await self._resolve_share_track(event, share, ctx, queue_wait_ms=queue_wait_ms)
+
+        try:
+            track = await self._run_task(_resolve_job)
+        except asyncio.QueueFull:
+            await event.send(event.plain_result(self.QUEUE_BUSY_HINT))
+            return False
+
+        if track is None:
+            await event.send(
+                event.plain_result(self.SHARE_NOT_FOUND_HINT.format(label=share.label))
+            )
+            return False
+
+        return await self._send_via_queue(
+            event,
+            track,
+            record_ctx={
+                "trigger_type": "share",
+                "command": command,
+                "keyword": share.keyword or share.title or share.url,
+                "selected_index": 1,
+                "selection_type": "share",
+                **ctx,
+            },
+            flow_start=flow_start,
+            delivery=delivery,
+        )
+
+    async def _resolve_share_track(
+        self, event: AstrMessageEvent, share: ShareInfo, ctx: dict, queue_wait_ms: int = 0
+    ) -> Track | None:
+        """分享 → 曲目：先用链接里的平台原生 id 精确取详情，失败再按「歌名 歌手」搜索。"""
+        if share.platform and share.track_id:
+            track = await self._track_by_native_id(share)
+            if track is not None:
+                return track
+        if not share.keyword:
+            return None
+        tracks, _search_ms = await self._search_with_record(
+            event,
+            share.keyword,
+            max(3, min(10, self.cfg.song_limit)),
+            share.platform,
+            ctx,
+            "share",
+            queue_wait_ms=queue_wait_ms,
+            send_hint=False,
+        )
+        if not tracks:
+            return None
+        return pick_best_track(tracks, share.title, share.singer, share.platform)
+
+    async def _track_by_native_id(self, share: ShareInfo) -> Track | None:
+        """按分享链接里的原生 id 取曲目详情（取不到返回 None，由调用方退化搜索）。"""
+        music_id = f"{share.platform}:{share.track_id}"
+        try:
+            data = await self.api.music_info(music_id)
+        except ApiError as e:
+            logger.warning(
+                f"[萌音点歌] 分享按 id 取详情失败，退化为搜索：code={e.code} {e.message}（{music_id}）"
+            )
+            return None
+        except Exception:
+            logger.warning(
+                f"[萌音点歌] 分享按 id 取详情异常，退化为搜索：\n{traceback.format_exc()}"
+            )
+            return None
+        if not data or not str(data.get("name") or "").strip():
+            logger.info(f"[萌音点歌] 分享按 id 取不到曲目，退化为搜索：{music_id}")
+            return None
+        track = Track.from_api(data)
+        logger.info(f"[萌音点歌] 分享已按原生 id 精确定位：{music_id}《{track.display}》")
+        return track
 
     async def handle_song_request(
         self,

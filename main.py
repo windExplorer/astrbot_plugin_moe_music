@@ -2,8 +2,14 @@
 
 命令：
 - ``点歌 <歌名> [序号]`` 及平台别名（网易点歌 / QQ点歌 / 酷狗点歌 …）
+- ``点歌文件 <歌名> [序号]``（下载音乐文件并内嵌封面与歌词）
 - ``查歌词 <歌名>``
 - ``点歌自检``
+
+分享识别（v0.11.5）：
+- 引用别人的分享再发「点歌」/「点歌文件」→ 直接播放 / 下载那首歌（不受开关影响）；
+- 开启 share_auto_play（默认关闭）后：群里有人分享 QQ音乐 / 网易云 / 酷狗 / 酷我
+  的歌曲卡片或链接 → 自动识别并发语音。
 
 LLM Tool：
 - ``play_song_by_name`` / ``query_lyrics_by_name``
@@ -26,6 +32,7 @@ from .core.config import LLM_SOURCE_ALIAS, PluginConfig, resolve_command_source
 from .core.lyrics_render import LyricsRenderer
 from .core.queue import SongTaskQueue
 from .core.sender import SongSender
+from .core.share import extract_quoted_share, extract_share
 from .core.songlist_render import SonglistRenderer
 from .core.storage import RecordStore
 
@@ -55,6 +62,7 @@ USAGE_HINT = (
 FILE_USAGE_HINT = (
     "用法：点歌文件 <歌名> [序号]\n"
     "也可以用：网易点歌文件 / QQ点歌文件 / 酷狗点歌文件 / 酷我点歌文件 / 咪咕点歌文件 <歌名>\n"
+    "引用别人的歌曲分享再发这条指令，可直接下载那首歌的文件～\n"
     "会下载音乐文件并写入封面与歌词（音质可在配置里单独调整）～"
 )
 
@@ -185,13 +193,73 @@ class MoeMusicPlugin(Star):
         await self.store.close()
         self.sender.cleanup_download_dir()
 
+    # ============ 分享识别 ============
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    async def share_message(self, event: AstrMessageEvent):
+        """群里分享 QQ音乐 / 网易云 / 酷狗 / 酷我 的歌曲卡片或链接 → 自动发语音。
+
+        认不出分享内容时立刻返回，不打断本条消息的其他处理（命令 / AI 照常）。
+        识别成功则吞掉事件：已经发过语音，不该再让 AI 复读一句。
+        """
+        if not self.cfg.share_auto_play:
+            return
+        # 未配置后端时静默放弃——这里是「每条消息都会走」的钩子，
+        # 不能像 _check_ready 那样每条都提示「音乐服务配置有误」。
+        if not self.cfg.api_base_url or not self.cfg.api_key:
+            return
+        share = self._extract_share_safely(event)
+        if share is None:
+            return
+        try:
+            await self.service.handle_share_request(event, share)
+        except Exception:
+            logger.error(f"[萌音点歌] 分享处理异常：\n{traceback.format_exc()}")
+            await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
+        finally:
+            event.stop_event()
+
+    @staticmethod
+    def _extract_share_safely(event: AstrMessageEvent):
+        """提取本条消息里的分享（异常一律当成「没有分享」，绝不影响消息的其他处理）。"""
+        try:
+            return extract_share(event.get_messages())
+        except Exception:
+            logger.warning(f"[萌音点歌] 分享识别异常：\n{traceback.format_exc()}")
+            return None
+
+    async def _handle_quoted_share(
+        self, event: AstrMessageEvent, *, file_mode: bool, command: str
+    ) -> bool:
+        """「引用分享 + 点歌指令（不带歌名）」：直接对引用里的分享卡片下手。
+
+        Returns:
+            bool: 引用里是否识别到分享（True 表示本次请求已由分享链路接管）。
+        """
+        try:
+            share = extract_quoted_share(event.get_messages())
+        except Exception:
+            logger.warning(f"[萌音点歌] 引用分享识别异常：\n{traceback.format_exc()}")
+            return False
+        if share is None:
+            return False
+        try:
+            await self.service.handle_share_request(
+                event, share, file_mode=file_mode, command=command
+            )
+        except Exception:
+            logger.error(f"[萌音点歌] 引用分享处理异常：\n{traceback.format_exc()}")
+            await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
+        return True
+
     # ============ 命令 ============
 
     @filter.command("点歌", alias=SONG_COMMAND_ALIASES)
     async def song_command(self, event: AstrMessageEvent):
         """点歌 / 网易点歌 / QQ点歌 / 腾讯点歌 / 酷狗点歌 / 酷我点歌 / 咪咕点歌 / 网易 <歌名> [序号]
 
-        点歌支持一次到位语法（歌名后跟序号直接发送）。
+        点歌支持一次到位语法（歌名后跟序号直接发送）；
+        不带歌名、但引用了别人的歌曲分享时，直接点那首。
         """
 
         if not self._check_ready(event):
@@ -209,6 +277,10 @@ class MoeMusicPlugin(Star):
             arg = " ".join(tokens[:-1])
 
         if not arg:
+            # 「引用分享 + 点歌」：把引用里的歌当成歌名
+            if await self._handle_quoted_share(event, file_mode=False, command=cmd):
+                event.stop_event()
+                return
             await event.send(event.plain_result(USAGE_HINT))
             event.stop_event()
             return
@@ -229,6 +301,7 @@ class MoeMusicPlugin(Star):
 
         平台前缀别名与点歌一致（网易 / QQ / 腾讯 / 酷狗 / 酷我 / 咪咕）+「点歌文件」。
         下载音乐文件（内嵌封面与歌词），音质与普通点歌分开配置；流程同点歌。
+        不带歌名、但引用了别人的歌曲分享时，直接下载那首歌的文件。
         """
 
         if not self._check_ready(event):
@@ -247,6 +320,10 @@ class MoeMusicPlugin(Star):
             arg = " ".join(tokens[:-1])
 
         if not arg:
+            # 「引用分享 + 点歌文件」：下载引用里那首歌的文件本体
+            if await self._handle_quoted_share(event, file_mode=True, command=cmd):
+                event.stop_event()
+                return
             await event.send(event.plain_result(FILE_USAGE_HINT))
             event.stop_event()
             return
