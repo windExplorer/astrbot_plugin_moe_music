@@ -247,9 +247,10 @@ def _spy_sender(service):
     """拦截真实发送，记录本次使用的 DeliveryOptions（避免测试里真去下载文件）。"""
     captured: dict = {}
 
-    async def _spy(event, track, record_ctx=None, timings=None, options=None):
+    async def _spy(event, track, record_ctx=None, timings=None, options=None, song_card=None):
         captured["options"] = options
         captured["track"] = track
+        captured["song_card"] = song_card
         return True
 
     service.sender.send_track = _spy
@@ -393,23 +394,31 @@ class TestPluginShareHook:
     def _plugin(self, api, config=None):
         from astrbot_plugin_moe_music.main import MoeMusicPlugin
 
+        # 插件级用例不开增强抓取（联网 / LLM 的增强逻辑由 test_song_card_flow.py
+        # 用假实现覆盖），保证这些用例离线且确定
+        offline = {
+            "song_card_year": False,
+            "song_card_comment": False,
+            "song_card_artist_bio": False,
+        }
         plugin = MoeMusicPlugin(
             context=None,
-            config={"api_base_url": api._base_url, "api_key": "sk-test", **(config or {})},
+            config={"api_base_url": api._base_url, "api_key": "sk-test", **offline, **(config or {})},
         )
         plugin.api._base_url = api._base_url
         return plugin
 
     async def test_share_message_sends_and_stops(self):
-        """开关打开后：分享卡片按语音发送（record 段），并吞掉事件不再交给 AI。"""
+        """开关打开后：先发信息卡片，再按语音发送（record 段），并吞掉事件不再交给 AI。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:
             plugin = self._plugin(api, {"share_auto_play": True})
             event = self._Event(components=[json_card(KUWO_CARD)])
             await plugin.share_message(event)
             assert event.stopped  # 已处理：不再交给 AI
             kinds = [item[0] for item in event.sent]
-            assert kinds == ["chain"]
-            segs = event.sent[0][1]
+            assert kinds == ["chain", "chain"]
+            assert isinstance(event.sent[0][1][0], COMPONENTS.Image)  # 信息卡片
+            segs = event.sent[1][1]
             assert getattr(segs[0], "file", "") == "http://h/api/temp/t"  # 语音段：链接
 
     async def test_share_message_text_mode(self):
@@ -480,6 +489,115 @@ class TestPluginShareHook:
             await plugin.song_command(event)
             assert event.stopped
             assert captured["options"].modes == ["record_link", "text"]
+
+
+class TestQuotedCommands:
+    """「引用分享 + 下载 / 歌词」：分别对应下载文件与查歌词（v0.11.8）。"""
+
+    class _Event(MockEvent):
+        def __init__(self, components=None, **kwargs):
+            super().__init__(**kwargs)
+            self._components = components or []
+
+        def get_messages(self):
+            return self._components
+
+    def _plugin(self, api, config=None):
+        from astrbot_plugin_moe_music.main import FILE_COMMAND_ALIASES, MoeMusicPlugin
+
+        assert "下载" in FILE_COMMAND_ALIASES  # 「下载」是点歌文件的短别名
+        offline = {
+            "song_card_year": False,
+            "song_card_comment": False,
+            "song_card_artist_bio": False,
+        }
+        plugin = MoeMusicPlugin(
+            context=None,
+            config={"api_base_url": api._base_url, "api_key": "sk-test", **offline, **(config or {})},
+        )
+        plugin.api._base_url = api._base_url
+        return plugin
+
+    def _lrc_event(self, api, **kwargs):
+        lrc = "[00:01.00]故事的小黄花\n[00:02.00]从出生那年就飘着"
+        return self._Event(
+            **kwargs
+        ), FakeBackend(search_result=[track_json(1)], lyric_text=lrc)
+
+    async def test_download_alias_with_quoted_share(self):
+        """引用分享 + 「下载」→ 走文件下载链路（= 点歌文件）。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            plugin = self._plugin(api)
+            captured = _spy_sender(plugin.service)
+            event = self._Event(message_str="下载", components=[reply([json_card(KUWO_CARD)])])
+            await plugin.song_file_command(event)
+            assert event.stopped
+            assert captured["options"].modes == ["file_local"]
+            searches = [c for c in api.calls if c[0] == "search"]
+            assert searches and searches[0][1]["keyword"] == "七里香 周杰伦"
+
+    async def test_lyrics_alias_with_quoted_share(self):
+        """引用分享 + 「歌词」→ 查那首歌的歌词（图片渲染）。"""
+        lrc = "[00:01.00]故事的小黄花\n[00:02.00]从出生那年就飘着"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            plugin = self._plugin(api)
+            event = self._Event(
+                message_str="歌词", components=[reply([json_card(KUWO_CARD)])]
+            )
+            await plugin.lyrics_command(event)
+            assert event.stopped
+            searches = [c for c in api.calls if c[0] == "search"]
+            assert searches and searches[0][1]["keyword"] == "七里香 周杰伦"
+            chain = event.sent[-1][1]
+            assert any(isinstance(seg, COMPONENTS.Image) for seg in chain)  # 歌词图片
+
+    async def test_lyrics_alias_standalone(self):
+        """「歌词 <歌名>」不带引用也能当查歌词用。"""
+        lrc = "[00:01.00]歌词内容"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            plugin = self._plugin(api)
+            event = self._Event(message_str="歌词 晴天")
+            await plugin.lyrics_command(event)
+            assert event.stopped
+            chain = event.sent[-1][1]
+            assert any(isinstance(seg, COMPONENTS.Image) for seg in chain)
+
+    async def test_lyrics_with_quoted_share_not_found(self):
+        async with FakeBackend(search_result=[]) as api:
+            plugin = self._plugin(api)
+            event = self._Event(message_str="歌词", components=[reply([json_card(KUWO_CARD)])])
+            await plugin.lyrics_command(event)
+            assert event.stopped
+            assert event.sent[-1] == (
+                "plain",
+                "识别到分享的《七里香》，但没能在音源里找到，稍后再试试吧～",
+            )
+
+    async def test_lyrics_without_quote_shows_usage(self):
+        async with FakeBackend(search_result=[]) as api:
+            plugin = self._plugin(api)
+            event = self._Event(message_str="歌词")
+            await plugin.lyrics_command(event)
+            assert any("用法" in item[1] for item in event.sent if item[0] == "plain")
+
+    async def test_quoted_plain_text_link_download(self):
+        """引用的是纯文本分享链接（网易云）同样能下载：链接里的 id 直接定位。"""
+        link = plain("https://music.163.com/song?id=1330348068")
+
+        async def info_handler(request):
+            return web.json_response({"code": 0, "message": "ok", "data": track_json(1)})
+
+        async with FakeBackend(
+            search_result=[track_json(1)],
+            extra_routes={"/api/v1/music/wy:{mid}/info": info_handler},
+        ) as api:
+            plugin = self._plugin(api)
+            captured = _spy_sender(plugin.service)
+            event = self._Event(message_str="下载", components=[reply([link])])
+            await plugin.song_file_command(event)
+            assert event.stopped
+            assert captured["track"].id == "wy:1"  # 按链接里的网易云 id 精确定位
+            assert captured["options"].modes == ["file_local"]
 
     async def test_quoted_share_without_share_shows_usage(self):
         async with FakeBackend(search_result=[]) as api:
