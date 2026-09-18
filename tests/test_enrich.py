@@ -84,11 +84,22 @@ async def wy_server(monkeypatch):
         ]},
         "kg_status": 200,
         "artist": {"artist": {"briefDesc": "周杰伦，华语流行男歌手。"}},
+        "wiki_search": {"query": {"search": [{"title": "晴天 (歌曲)"}]}},
+        "wiki_page": {
+            "query": {"pages": {"1": {
+                "extract": "《晴天》是周杰伦演唱的流行歌曲，收录于 2003 年专辑《叶惠美》。"
+            }}}
+        },
     }
     app = web.Application()
 
     async def artist_intro(request):
         return web.json_response(state["artist"])
+
+    async def wiki_api(request):
+        if request.query.get("list") == "search":
+            return web.json_response(state["wiki_search"])
+        return web.json_response(state["wiki_page"])
 
     async def detail(request):
         if state["detail_status"] != 200:
@@ -112,6 +123,7 @@ async def wy_server(monkeypatch):
 
     app.router.add_get("/api/song/detail/", detail)
     app.router.add_get("/api/artist/{aid}", artist_intro)
+    app.router.add_get("/w/api.php", wiki_api)
     app.router.add_get("/api/v1/resource/comments/{rid}", comments)
     app.router.add_get("/com.s", kw_comments)
     app.router.add_get("/r/v1/rank/topliked", kg_comments)
@@ -122,6 +134,7 @@ async def wy_server(monkeypatch):
     port = site._server.sockets[0].getsockname()[1]
     base = f"http://127.0.0.1:{port}"
     monkeypatch.setattr(enrich_mod, "WY_API_BASE", base)
+    monkeypatch.setattr(enrich_mod, "WIKI_API_BASE", f"{base}/w/api.php")
     monkeypatch.setattr(enrich_mod, "KW_COMMENT_URL", f"{base}/com.s")
     monkeypatch.setattr(enrich_mod, "KG_COMMENT_BASE", base)
     yield state
@@ -292,6 +305,46 @@ class TestMultiPlatformComments:
         comment, source = await make_enricher(api).fetch_hot_comment_for_track(make_track())
         assert comment is None and source == ""
         assert api.calls == []  # 没有发起同曲映射搜索
+
+
+class TestSongIntroWiki:
+    """歌曲简介的维基百科开放接口：搜词条 → 取首段（校验很严）。"""
+
+    async def test_intro_from_wiki(self, wy_server):
+        intro = await make_enricher().fetch_song_intro_wiki(make_track())
+        assert intro is not None
+        assert "周杰伦" in intro and "晴天" in intro
+
+    async def test_title_mismatch_rejected(self, wy_server):
+        """词条标题不含歌名（同名影视页之类）不能当歌曲简介。"""
+        wy_server["wiki_search"] = {"query": {"search": [{"title": "晴天 (电视剧)"}]}}
+        # 标题里有「晴天」会被放行去取正文，但正文没提到歌手 → 仍被拒
+        wy_server["wiki_page"] = {"query": {"pages": {"1": {"extract": "一部电视剧的剧情介绍。"}}}}
+        assert await make_enricher().fetch_song_intro_wiki(make_track()) is None
+
+    async def test_disambiguation_page_rejected(self, wy_server):
+        wy_server["wiki_page"] = {
+            "query": {"pages": {"1": {"extract": "晴天，消歧义页，指代多个条目。周杰伦是其中之一。"}}}
+        }
+        assert await make_enricher().fetch_song_intro_wiki(make_track()) is None
+
+    async def test_singer_not_mentioned_rejected(self, wy_server):
+        """正文没提到歌手：宁可不用，避免挂错歌。"""
+        wy_server["wiki_page"] = {
+            "query": {"pages": {"1": {"extract": "《晴天》是一部动画的片尾曲，作者另有其人。"}}}
+        }
+        assert await make_enricher().fetch_song_intro_wiki(make_track()) is None
+
+    async def test_no_search_hit_returns_none(self, wy_server):
+        wy_server["wiki_search"] = {"query": {"search": []}}
+        assert await make_enricher().fetch_song_intro_wiki(make_track()) is None
+
+    async def test_blank_title_returns_none(self):
+        from types import SimpleNamespace
+
+        assert await make_enricher().fetch_song_intro_wiki(
+            SimpleNamespace(name="  ", singer="x")
+        ) is None
 
 
 class TestResolveWyId:

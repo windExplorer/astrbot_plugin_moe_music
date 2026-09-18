@@ -25,6 +25,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 from astrbot.api import logger
@@ -33,6 +34,9 @@ from .model import Track
 
 # 网易云公开接口地址（测试可替换为本地假服务）
 WY_API_BASE = "https://music.163.com"
+
+# 中文维基百科 API（歌曲简介开放接口；测试可替换为本地假服务）
+WIKI_API_BASE = "https://zh.wikipedia.org/w/api.php"
 
 # 酷我热评：老客户端接口，无需签名（酷我曲目 id 就是参数里的 sid）
 KW_COMMENT_URL = "http://ncomment.kuwo.cn/com.s"
@@ -261,6 +265,44 @@ class Enricher:
         artist = data.get("artist") if isinstance(data.get("artist"), dict) else {}
         desc = _clean_text(_strip_html(str(artist.get("briefDesc") or "")), BIO_MAX_CHARS)
         return desc or None
+
+    async def fetch_song_intro_wiki(self, track: Track) -> str | None:
+        """中文维基百科的歌曲简介（开放接口、免 key）：搜词条 → 取首段。
+
+        校验很严：词条标题须含歌名（归一化后），首段须提到歌手——避免把同名
+        影视页 / 消歧义页当成歌曲简介。覆盖率有限（名曲才有词条），拿不到返回
+        None（交给 LLM 兜底）。
+        """
+        title = (track.name or "").strip()
+        if not title:
+            return None
+        query = " ".join(x for x in (title, track.singer) if x).strip()
+        search = await self._get_json_url(
+            f"{WIKI_API_BASE}?action=query&list=search&srlimit=3&format=json&utf8=1"
+            f"&srsearch={quote(query)}"
+        )
+        hits = ((search or {}).get("query") or {}).get("search") or []
+        norm_title = _norm(title)
+        for hit in hits[:3]:
+            page_title = str(hit.get("title") or "")
+            if not page_title or (norm_title and norm_title not in _norm(page_title)):
+                continue
+            page = await self._get_json_url(
+                f"{WIKI_API_BASE}?action=query&prop=extracts&exintro&explaintext"
+                f"&format=json&utf8=1&titles={quote(page_title)}"
+            )
+            pages = ((page or {}).get("query") or {}).get("pages") or {}
+            extract = ""
+            for p in pages.values():
+                if isinstance(p, dict) and p.get("extract"):
+                    extract = str(p["extract"])
+                    break
+            if not extract or "消歧义" in extract[:80] or "指代" in extract[:60]:
+                continue
+            text = _clean_text(_strip_html(extract), BIO_MAX_CHARS)
+            if text and _mentions_singer(text, track.singer):
+                return text
+        return None
 
     async def fetch_year(self, wy_id: str) -> int | None:
         """取发行年份（``fetch_wy_detail`` 的便捷封装，兼容旧调用）。"""
@@ -491,6 +533,18 @@ def _parse_llm_json(text: str) -> dict:
 def _norm(text: str) -> str:
     """歌名/歌手归一化：小写 + 去空格标点（与 commands.pick_best_track 同一套规则）。"""
     return re.sub(r"[\s\-_/·、,，.。!！?？'\"“”‘’()（）\[\]【】]+", "", (text or "").lower())
+
+
+def _mentions_singer(text: str, singer: str) -> bool:
+    """简介正文里是否提到了歌手（任一歌手名命中即可；歌手为空则放宽通过）。"""
+    names = [
+        n.strip()
+        for n in re.split(r"[/、,，&]| and ", singer or "")
+        if len(n.strip()) >= 2
+    ]
+    if not names:
+        return True
+    return any(n in text for n in names)
 
 
 def _kg_signature(params: str) -> str:

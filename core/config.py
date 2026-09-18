@@ -143,6 +143,7 @@ class PluginConfig:
     llm_provider_id: str = ""  # 卡片信息用的模型 ID；空 = 跟随系统当前对话模型
     info_retry_days: int = 0  # 抓取失败后的重试间隔（天）；0 = 永不重试（成功数据永久保存）
     llm_web_search: bool = True  # LLM 获取信息时是否允许联网搜索（关 = 单轮直调，更快）
+    song_intro_wiki: bool = True  # 歌曲简介优先用中文维基百科开放接口（快），LLM 兜底
     song_card_comment: bool = True  # 补热评第一条（wy/kw/kg 直取，失败静默跳过）
     song_card_artist_bio: bool = True  # 用 LLM 生成歌手简介（无可用模型时自动跳过）
     song_card_repeat_sec: int = 300  # 同会话同一首歌在此秒数内不重复发卡片（0 = 每次都发）
@@ -230,6 +231,7 @@ class PluginConfig:
             llm_provider_id=str(config.get("llm_provider_id", "") or "").strip(),
             info_retry_days=_int_opt("info_retry_days", 0, 0, 36500),
             llm_web_search=bool(config.get("llm_web_search", True)),
+            song_intro_wiki=bool(config.get("song_intro_wiki", True)),
             song_card_comment=bool(config.get("song_card_comment", True)),
             song_card_artist_bio=bool(config.get("song_card_artist_bio", True)),
             song_card_repeat_sec=_int_opt("song_card_repeat_sec", 300, 0, 3600),

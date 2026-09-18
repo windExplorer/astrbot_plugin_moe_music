@@ -219,6 +219,12 @@
         "type": "bool",
         "default": true
     },
+    "song_intro_wiki": {
+        "description": "歌曲简介优先用维基百科",
+        "hint": "开启后歌曲简介优先查中文维基百科开放接口（免 key、快、事实内容；校验很严：词条标题须含歌名、正文须提到歌手，避免同名影视混入），查不到再走 LLM。维基词条只覆盖名曲，普通歌仍会走 LLM",
+        "type": "bool",
+        "default": true
+    },
     "song_card_repeat_sec": {
         "description": "重复卡片间隔（秒）",
         "hint": "同一会话内重复点同一首歌，在此时间窗内不重复发卡片（歌照常发）；填 0 表示每次都发",

@@ -63,6 +63,7 @@ class FakeEnricher:
         self.comment = comment
         self.bio = bio  # LLM 生成的歌手简介
         self.api_bio = api_bio  # 网易云接口直取的歌手简介（默认无 → LLM 兜底）
+        self.wiki_intro = None  # 维基百科直取的歌曲简介（默认无 → LLM 兜底）
         self.wy_calls = 0
         self.detail_calls = 0
         self.llm_calls = 0
@@ -87,6 +88,9 @@ class FakeEnricher:
     async def fetch_artist_intro_wy(self, artist_id):
         self.artist_api_calls += 1
         return self.api_bio
+
+    async def fetch_song_intro_wiki(self, track):
+        return self.wiki_intro
 
     async def fetch_card_info(
         self, track, need_year=False, need_intro=False, need_bio=False, event=None, umo=None
@@ -399,6 +403,18 @@ class TestBackgroundEnrich:
             artist = await service.info_cache.get_artist("歌手1")
             assert artist["bio"] == "测试歌手简介"
             assert artist["source"] == "llm"
+
+    async def test_song_intro_wiki_preferred_over_llm(self, tmp_path):
+        """歌曲简介优先走维基百科开放接口：命中后不再为简介调 LLM。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path, song_card_artist_bio=False)
+            enricher.wiki_intro = "来自维基百科的简介"
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            row = await service.info_cache.get_song("wy:1")
+            assert row["intro"] == "来自维基百科的简介"
+            assert row["intro_source"] == "wiki"
+            assert enricher.llm_calls == 0  # 简介已由接口提供，LLM 完全不用调
 
     async def test_llm_intro_stored_as_llm_source(self, tmp_path):
         """歌曲简介来自 LLM（intro_source=llm），一次调用同时覆盖歌手简介。"""

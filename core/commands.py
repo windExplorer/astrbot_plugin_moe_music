@@ -1159,21 +1159,30 @@ class MoeMusicService:
                 artist_fields.update({"bio": bio, "source": "wy", "attempt_at": time.time()})
         llm_bio_pending = bio_pending and not artist_fields.get("bio")
 
-        # 3) LLM 一次调用：歌曲简介（+ 年份兜底 + 歌手简介兜底）。
+        # 3) 歌曲简介：中文维基百科开放接口优先（快、事实），拿不到再交给 LLM。
+        wiki_intro = None
+        if intro_pending and self.cfg.song_intro_wiki and self.enricher is not None:
+            wiki_intro = await self.enricher.fetch_song_intro_wiki(track)
+            if wiki_intro:
+                fields["intro"] = wiki_intro
+                fields["intro_source"] = "wiki"
+        llm_intro_pending = intro_pending and not wiki_intro
+
+        # 4) LLM 一次调用：歌曲简介（+ 年份兜底 + 歌手简介兜底）。
         #    拿不到的字段不编造；负缓存（info_at / attempt_at）避免反复调。
         llm_year_pending = need_year and not fields.get("year") and not fresh(
             row.get("year"), row.get("info_at"), self._retry_ttl
         )
-        if self.enricher is not None and (intro_pending or llm_bio_pending or llm_year_pending):
+        if self.enricher is not None and (llm_intro_pending or llm_bio_pending or llm_year_pending):
             data = await self.enricher.fetch_card_info(
                 track,
                 need_year=llm_year_pending,
-                need_intro=intro_pending,
+                need_intro=llm_intro_pending,
                 need_bio=llm_bio_pending,
                 event=event,
                 umo=umo,
             ) or {}
-            if intro_pending and data.get("intro"):
+            if llm_intro_pending and data.get("intro"):
                 fields["intro"] = data["intro"]
                 fields["intro_source"] = "llm"
             if llm_year_pending and data.get("year") and not fields.get("year"):
