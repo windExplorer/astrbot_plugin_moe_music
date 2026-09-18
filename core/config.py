@@ -138,7 +138,8 @@ class PluginConfig:
     # 歌曲信息卡片：点歌成功后先发卡片（图片）、再发音频
     song_card_enable: bool = True  # 是否发送卡片
     song_card_year: bool = True  # 用网易云公开接口补发行年份
-    song_card_intro: bool = True  # 补歌曲简介（网易云专辑简介优先，LLM 总结兜底）
+    song_card_intro: bool = True  # 补歌曲简介（LLM 生成为主，专辑文案占位兜底）
+    song_card_llm_sync: bool = True  # 卡片等 LLM 预取简介/歌手简介（缓存缺失时）
     song_card_comment: bool = True  # 补热评第一条（wy/kw/kg 直取，失败静默跳过）
     song_card_artist_bio: bool = True  # 用 LLM 生成歌手简介（无可用模型时自动跳过）
     song_card_repeat_sec: int = 300  # 同会话同一首歌在此秒数内不重复发卡片（0 = 每次都发）
@@ -222,6 +223,7 @@ class PluginConfig:
             song_card_enable=bool(config.get("song_card_enable", True)),
             song_card_year=bool(config.get("song_card_year", True)),
             song_card_intro=bool(config.get("song_card_intro", True)),
+            song_card_llm_sync=bool(config.get("song_card_llm_sync", True)),
             song_card_comment=bool(config.get("song_card_comment", True)),
             song_card_artist_bio=bool(config.get("song_card_artist_bio", True)),
             song_card_repeat_sec=_int_opt("song_card_repeat_sec", 300, 0, 3600),

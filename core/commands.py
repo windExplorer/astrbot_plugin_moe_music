@@ -864,6 +864,9 @@ class MoeMusicService:
 
         判定与 ``_enrich_song`` / ``_enrich_artist`` 的「要不要补」保持一致：任一
         开启项还要联网或调 LLM，就视为没备齐 → 先发歌，卡片等补齐完成后再补发。
+
+        ``song_card_llm_sync`` 关闭时不等 LLM（歌曲简介/歌手简介纯后台补），
+        卡片只发缓存里已有的——首次就是基础卡片。
         """
         if not (
             self.cfg.song_card_year
@@ -871,6 +874,8 @@ class MoeMusicService:
             or self.cfg.song_card_comment
             or self.cfg.song_card_artist_bio
         ):
+            return True
+        if not self.cfg.song_card_llm_sync:
             return True
         if self.info_cache is None:
             return True

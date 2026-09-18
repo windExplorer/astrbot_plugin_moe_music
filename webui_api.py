@@ -113,6 +113,7 @@ _EDITABLE_KEYS = {
     "song_card_enable",
     "song_card_year",
     "song_card_intro",
+    "song_card_llm_sync",
     "song_card_comment",
     "song_card_artist_bio",
     "song_card_repeat_sec",

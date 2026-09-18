@@ -190,6 +190,30 @@ class TestCardOrderAndSwitch:
             assert second.sent[1][0] == "chain" and not is_image(second.sent[1])
             assert renderer.calls[-1]["info"].year == 2014
 
+    async def test_llm_sync_off_card_never_waits(self, tmp_path):
+        """song_card_llm_sync 关：卡片永不等待——首次就发基础卡片，信息纯后台补。"""
+        async with FakeBackend(
+            search_result=[track_json(1)], extra_routes=await cover_routes()
+        ) as api:
+            service, renderer, _ = make_service(
+                api, tmp_path, song_card_repeat_sec=0, song_card_llm_sync=False
+            )
+            event = MockEvent()
+            await service.handle_song_request(event, "晴天", index_hint=1)
+            # 首次：先发基础卡片（此时增强信息还没补），后发歌
+            assert is_image(event.sent[0]), "不等 LLM 时应先发基础卡片"
+            assert renderer.calls[0]["info"].year == 0
+            assert event.sent[1][0] == "chain" and not is_image(event.sent[1])
+            await drain_background(service)
+            row = await service.info_cache.get_song("wy:1")
+            assert row["year"] == 2014  # 背景补齐照常进行
+            # 第二次：缓存里有啥发啥（完整卡片）
+            second = MockEvent()
+            await service.handle_song_request(second, "晴天", index_hint=1)
+            await drain_background(service)
+            assert renderer.calls[-1]["info"].year == 2014
+            assert renderer.calls[-1]["info"].intro == "测试歌曲简介"
+
     async def test_card_disabled(self, tmp_path):
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, renderer, _ = make_service(api, tmp_path, song_card_enable=False)

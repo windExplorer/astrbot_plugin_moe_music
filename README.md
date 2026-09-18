@@ -43,7 +43,8 @@
 | `share_quality` | 分享识别取链音质（超 Key 上限自动收敛） | `320k` |
 | `song_card_enable` | 歌曲信息卡片（点歌后先发卡片再发音频） | `true` |
 | `song_card_year` | 卡片补充发行年份（网易云公开接口） | `true` |
-| `song_card_intro` | 卡片补充歌曲简介（网易云专辑简介优先，LLM 兜底） | `true` |
+| `song_card_intro` | 卡片补充歌曲简介（LLM 生成为主，专辑文案占位兜底） | `true` |
+| `song_card_llm_sync` | 首次点歌时卡片等 LLM 预取简介/歌手简介再发（关 = 卡片永不等待） | `true` |
 | `song_card_comment` | 卡片补充热评第一条（网易云 / 酷我 / 酷狗，可能被限流） | `true` |
 | `song_card_artist_bio` | 卡片补充 AI 生成的歌手简介（缓存复用） | `true` |
 | `song_card_repeat_sec` | 同会话同一首歌不重复发卡片的窗口（秒，0 = 每次都发） | `300` |
