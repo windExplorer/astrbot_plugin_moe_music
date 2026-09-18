@@ -156,28 +156,46 @@ async def cover_routes() -> dict:
 
 
 class TestCardOrderAndSwitch:
-    async def test_card_sent_before_song(self, tmp_path):
-        """先卡片、后歌曲；卡片能拿到真实封面字节。"""
-        async with FakeBackend(
-            search_result=[track_json(1)], extra_routes=await cover_routes()
-        ) as api:
-            service, renderer, _ = make_service(api, tmp_path)
+    async def test_card_races_song(self, tmp_path):
+        """卡片与歌曲竞速：缓存冷 → 先歌后卡片（补齐后补发，信息齐全）；缓存热 → 先卡片后歌。"""
+        routes = await cover_routes()
+
+        async def wy_cover(request):
+            return web.Response(body=jpeg_bytes(), content_type="image/jpeg")
+
+        routes["/wy-cover.jpg"] = wy_cover
+        async with FakeBackend(search_result=[track_json(1)], extra_routes=routes) as api:
+            service, renderer, enricher = make_service(api, tmp_path, song_card_repeat_sec=0)
+            # 补齐任务会把网易云封面写进缓存，测试里让它指向本地假服务才下载得到
+            enricher.cover = f"{api._base_url}/wy-cover.jpg"
             event = MockEvent()
             await service.handle_song_request(event, "晴天", index_hint=1)
+            await drain_background(service)
 
-            assert len(event.sent) == 2
-            assert is_image(event.sent[0]), "第一张应是信息卡片"
-            assert event.sent[1][0] == "chain" and not is_image(event.sent[1])
+            # 第一次：歌曲先走，卡片等补齐完成后补发（不再顶着空信息出去）
+            assert event.sent[0][0] == "chain" and not is_image(event.sent[0]), "首次应先发歌"
+            assert len(event.sent) == 2 and is_image(event.sent[1]), "补齐完成后应补发完整卡片"
             call = renderer.calls[0]
             assert call["cover"] and call["cover"][:2] == b"\xff\xd8"  # 真封面
             assert call["requester"] == "测试用户"
             assert call["quality"] == "320k"
+            assert call["info"].year == 2014  # 补发卡片带增强信息
+            assert call["info"].intro or call["info"].hot_comment
+
+            # 第二次（缓存热）：先发卡片、后发歌，信息同样齐全
+            second = MockEvent()
+            await service.handle_song_request(second, "晴天", index_hint=1)
+            await drain_background(service)
+            assert is_image(second.sent[0]), "缓存热时应先发卡片"
+            assert second.sent[1][0] == "chain" and not is_image(second.sent[1])
+            assert renderer.calls[-1]["info"].year == 2014
 
     async def test_card_disabled(self, tmp_path):
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, renderer, _ = make_service(api, tmp_path, song_card_enable=False)
             event = MockEvent()
             await service.handle_song_request(event, "晴天", index_hint=1)
+            await drain_background(service)
             assert len(event.sent) == 1
             assert renderer.calls == []
 
@@ -187,11 +205,12 @@ class TestCardOrderAndSwitch:
             renderer.fail = True
             event = MockEvent()
             await service.handle_song_request(event, "晴天", index_hint=1)
+            await drain_background(service)
             assert len(event.sent) == 1  # 卡片渲染失败 → 只发歌
             assert not is_image(event.sent[0])
 
-    async def test_share_path_also_sends_card(self, tmp_path):
-        """分享识别走的也是同一条发送链路，同样先卡片后音频。"""
+    async def test_share_path_also_races_card(self, tmp_path):
+        """分享识别走同一条发送链路：歌先走，卡片补齐后补发。"""
         from astrbot_plugin_moe_music.core.share import parse_share_payload
         from test_share import KUWO_CARD, json_card
 
@@ -199,7 +218,9 @@ class TestCardOrderAndSwitch:
             service, _, _ = make_service(api, tmp_path)
             event = MockEvent()
             await service.handle_share_request(event, parse_share_payload(KUWO_CARD))
-            assert is_image(event.sent[0])
+            await drain_background(service)
+            assert not is_image(event.sent[0]), "分享首次也应先发音频"
+            assert is_image(event.sent[1]), "卡片随后补发"
             assert json_card is not None  # 保持导入被使用（分享卡片样例）
 
 
@@ -209,7 +230,9 @@ class TestCardDedup:
             service, renderer, _ = make_service(api, tmp_path, song_card_repeat_sec=300)
             first, second = MockEvent(), MockEvent()
             await service.handle_song_request(first, "晴天", index_hint=1)
+            await drain_background(service)  # 首次缓存冷：卡片在补齐后补发
             await service.handle_song_request(second, "晴天", index_hint=1)
+            await drain_background(service)
             assert len(renderer.calls) == 1  # 窗口内不重发卡片
             assert len(second.sent) == 1  # 但歌照发
             assert not is_image(second.sent[0])
@@ -218,16 +241,20 @@ class TestCardDedup:
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, renderer, _ = make_service(api, tmp_path, song_card_repeat_sec=0)
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
             assert len(renderer.calls) == 2
 
     async def test_other_session_not_deduped(self, tmp_path):
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, renderer, _ = make_service(api, tmp_path, song_card_repeat_sec=300)
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
             await service.handle_song_request(
                 MockEvent(umo="qq:GroupMessage:99999"), "晴天", index_hint=1
             )
+            await drain_background(service)
             assert len(renderer.calls) == 2  # 别群照样发
 
 
@@ -413,10 +440,11 @@ class TestRecentTrackQuote:
             enricher.cover = f"{api._base_url}/wy-cover.jpg"  # 指向本地假服务，真实可下载
             event = MockEvent()
             await service.handle_song_request(event, "晴天", index_hint=1)
+            await drain_background(service)
             assert renderer.calls[0]["cover"][:2] == b"\xff\xd8"  # 占位图被换成真封面
             row = await service.info_cache.get_song("wy:1")
             assert row["cover_url"] == enricher.cover  # 已写缓存，下次不再拉详情
-            assert enricher.detail_calls == 1  # 卡片路径拿详情时年份/简介一并入库
+            assert enricher.detail_calls == 1  # 补齐路径拿详情时封面/年份/简介一并入库
 
     async def test_no_cache_no_card_info(self, tmp_path):
         """缓存不可用（None）时卡片照样发，只是没有增强信息。"""

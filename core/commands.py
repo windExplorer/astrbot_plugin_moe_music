@@ -765,20 +765,39 @@ class MoeMusicService:
         timings: dict | None = None,
         delivery: DeliveryOptions | None = None,
     ) -> bool:
-        """发送歌曲的统一入口；开卡片时取链后先发信息卡片，开 enable_lyrics 时成功后追加歌词图。
+        """发送歌曲的统一入口；开 enable_lyrics 时成功后追加歌词图。
+
+        信息卡片与歌曲**竞速**：缓存已备齐（或没开增强项）时先发卡片再发歌；缓存
+        还有缺口（首次点歌最典型）时先发歌、后台补齐完成后再补发**完整**卡片——
+        首次的卡片不再顶着空白的年份 / 简介 / 热评出去，也不用让歌曲等补齐。
 
         delivery 非空（「点歌文件」指令）时不再追加歌词图片——歌词已写进文件标签。
         """
-        card = await self._prepare_song_card(event, track, delivery)
+        card = None
+        deferred_card = False
+        if self.cfg.song_card_enable and self.card_renderer is not None and self._card_allowed(event, track):
+            if (
+                self.enricher is not None
+                and self.info_cache is not None
+                and not await self._card_info_ready(track)
+            ):
+                deferred_card = True  # 先发歌；补齐完成后再补发完整卡片
+            else:
+                card = await self._prepare_song_card(event, track, delivery)
+
         sent = await self.sender.send_track(
             event, track, record_ctx=record_ctx, timings=timings, options=delivery, song_card=card
         )
         if sent:
             # 记住会话最近一次点歌：引用我们发的卡片/语音/文件时用来还原曲目
             self._remember_track(event, track)
-            # 增强信息（年份/简介/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
-            # 下次这首歌 / 这位歌手就能用上完整卡片
-            self._schedule_enrich(track, getattr(event, "unified_msg_origin", None))
+            umo = getattr(event, "unified_msg_origin", None)
+            if deferred_card:
+                self._schedule_deferred_card(event, track, delivery, umo)
+            else:
+                # 增强信息（年份/简介/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
+                # 下次这首歌 / 这位歌手就能用上完整卡片
+                self._schedule_enrich(track, umo)
         if sent and delivery is None and self.cfg.enable_lyrics:
             try:
                 await self.send_lyrics_for_track(event, track, quiet=True)
@@ -811,10 +830,12 @@ class MoeMusicService:
     async def _prepare_song_card(
         self, event: AstrMessageEvent, track: Track, delivery: DeliveryOptions | None
     ) -> bytes | None:
-        """渲染歌曲信息卡片；**只读缓存**，不联网也不调 LLM（那些在后台补齐任务里）。"""
+        """渲染歌曲信息卡片；**只读缓存**，不联网也不调 LLM（那些在后台补齐任务里）。
+
+        调用方负责先做 ``_card_allowed`` 去重判定（补发卡片的任务里不能重复判定，
+        否则刚记过时间戳就被去重拦下，卡片永远发不出来）。
+        """
         if not self.cfg.song_card_enable or self.card_renderer is None:
-            return None
-        if not self._card_allowed(event, track):
             return None
         info = await self._card_info(track)
         cover = await self._card_cover(track)
@@ -830,6 +851,42 @@ class MoeMusicService:
         except Exception:
             logger.warning(f"[萌音点歌] 信息卡片渲染失败（跳过卡片）：\n{traceback.format_exc()}")
             return None
+
+    async def _card_info_ready(self, track: Track) -> bool:
+        """卡片增强信息是否已备齐（缓存全命中）——决定卡片与歌曲谁先发。
+
+        判定与 ``_enrich_song`` / ``_enrich_artist`` 的「要不要补」保持一致：任一
+        开启项还要联网或调 LLM，就视为没备齐 → 先发歌，卡片等补齐完成后再补发。
+        """
+        if not (
+            self.cfg.song_card_year
+            or self.cfg.song_card_intro
+            or self.cfg.song_card_comment
+            or self.cfg.song_card_artist_bio
+        ):
+            return True
+        if self.info_cache is None:
+            return True
+        try:
+            row = await self.info_cache.get_song(track.id)
+            artist = await self.info_cache.get_artist(track.singer) if track.singer else {}
+        except Exception:
+            return True
+        if self.cfg.song_card_year and not fresh(row.get("year"), row.get("info_at")):
+            return False
+        if (
+            self.cfg.song_card_intro
+            and (not row.get("intro") or row.get("intro_source") != "llm")
+            and not fresh(None, row.get("info_at"))
+        ):
+            return False
+        if self.cfg.song_card_comment and not fresh(row.get("hot_comment"), row.get("info_at")):
+            return False
+        if self.cfg.song_card_artist_bio and track.singer and not fresh(
+            artist.get("bio"), artist.get("attempt_at")
+        ):
+            return False
+        return True
 
     async def _card_info(self, track: Track) -> CardInfo:
         """从缓存取卡片增强信息；缓存不可用/为空时返回空信息（卡片自动少画几块）。"""
@@ -915,12 +972,17 @@ class MoeMusicService:
     # ============ 增强信息后台补齐 ============
 
     def _schedule_enrich(self, track: Track, umo: str | None) -> None:
-        """把「补年份 / 补热评 / 补歌手简介」丢到后台任务，不阻塞发歌。"""
+        """把「补年份 / 补简介 / 补热评 / 补歌手简介」丢到后台任务，不阻塞发歌。"""
         if self.enricher is None or self.info_cache is None:
             return
         if not self.cfg.song_card_enable:
             return
-        if not (self.cfg.song_card_year or self.cfg.song_card_comment or self.cfg.song_card_artist_bio):
+        if not (
+            self.cfg.song_card_year
+            or self.cfg.song_card_intro
+            or self.cfg.song_card_comment
+            or self.cfg.song_card_artist_bio
+        ):
             return
         try:
             task = asyncio.create_task(self._enrich_track(track, umo))
@@ -929,6 +991,40 @@ class MoeMusicService:
             return
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    def _schedule_deferred_card(
+        self,
+        event: AstrMessageEvent,
+        track: Track,
+        delivery: DeliveryOptions | None,
+        umo: str | None,
+    ) -> None:
+        """缓存没备齐：歌曲已先发出，后台补齐完成后补发**完整**卡片（不阻塞、不去重拦）。"""
+        try:
+            task = asyncio.create_task(self._send_card_after_enrich(event, track, delivery, umo))
+        except RuntimeError:  # 事件循环不可用（插件卸载中）
+            logger.debug("[萌音点歌] 事件循环不可用，跳过补发卡片")
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _send_card_after_enrich(
+        self,
+        event: AstrMessageEvent,
+        track: Track,
+        delivery: DeliveryOptions | None,
+        umo: str | None,
+    ) -> None:
+        """补齐年份 / 简介 / 热评 / 歌手简介，然后渲染并发送卡片（失败只记日志）。"""
+        await self._enrich_track(track, umo)
+        try:
+            card = await self._prepare_song_card(event, track, delivery)
+            if card is not None:
+                await event.send(event.chain_result([Image.fromBytes(card)]))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(f"[萌音点歌] 补发信息卡片失败：\n{traceback.format_exc()}")
 
     async def _enrich_track(self, track: Track, umo: str | None) -> None:
         """补齐一首歌的增强信息（任何失败都只记日志，负缓存避免反复打接口）。"""

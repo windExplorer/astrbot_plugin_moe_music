@@ -398,6 +398,7 @@ class TestPluginShareHook:
         # 用假实现覆盖），保证这些用例离线且确定
         offline = {
             "song_card_year": False,
+            "song_card_intro": False,  # 补齐会打真实网易云接口，插件级用例保持离线
             "song_card_comment": False,
             "song_card_artist_bio": False,
         }
@@ -508,6 +509,7 @@ class TestQuotedCommands:
         assert "下载" in FILE_COMMAND_ALIASES  # 「下载」是点歌文件的短别名
         offline = {
             "song_card_year": False,
+            "song_card_intro": False,  # 补齐会打真实网易云接口，插件级用例保持离线
             "song_card_comment": False,
             "song_card_artist_bio": False,
         }
