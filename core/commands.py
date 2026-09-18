@@ -142,6 +142,9 @@ class MoeMusicService:
         self._card_sent_at: dict[tuple[str, str], float] = {}
         # 后台信息补齐任务（terminate 时统一取消，避免卸载后还在打外部接口）
         self._bg_tasks: set[asyncio.Task] = set()
+        # 负缓存重试间隔（秒）：抓取失败后多少天内不再试；0 = 永不重试（默认）。
+        # 注意这只是「失败重试」间隔——成功获取的数据永远永久保存。
+        self._retry_ttl = max(0, int(getattr(config, "info_retry_days", 0) or 0)) * 86400.0
         # 会话 -> (最近一次点歌的曲目, 时间)：引用我们发的卡片/语音时还原曲目用
         self._recent_tracks: dict[str, tuple[Track, float]] = {}
 
@@ -884,18 +887,20 @@ class MoeMusicService:
             artist = await self.info_cache.get_artist(track.singer) if track.singer else {}
         except Exception:
             return True
-        if self.cfg.song_card_year and not fresh(row.get("year"), row.get("info_at")):
+        if self.cfg.song_card_year and not fresh(row.get("year"), row.get("info_at"), self._retry_ttl):
             return False
         if (
             self.cfg.song_card_intro
             and (not row.get("intro") or row.get("intro_source") != "llm")
-            and not fresh(None, row.get("info_at"))
+            and not fresh(None, row.get("info_at"), self._retry_ttl)
         ):
             return False
-        if self.cfg.song_card_comment and not fresh(row.get("hot_comment"), row.get("info_at")):
+        if self.cfg.song_card_comment and not fresh(
+            row.get("hot_comment"), row.get("info_at"), self._retry_ttl
+        ):
             return False
         if self.cfg.song_card_artist_bio and track.singer and not fresh(
-            artist.get("bio"), artist.get("attempt_at")
+            artist.get("bio"), artist.get("attempt_at"), self._retry_ttl
         ):
             return False
         return True
@@ -955,7 +960,7 @@ class MoeMusicService:
             tried_at = None
             if self.info_cache is not None:
                 tried_at = (await self.info_cache.get_song(track.id)).get("cover_at")
-            if not fresh(None, tried_at):  # 近期试过仍无封面 → 该歌确实没有，7 天内不再试
+            if not fresh(None, tried_at, self._retry_ttl):  # 试过仍无封面 → 负缓存期内不再试
                 wy_id = track.id.split(":", 1)[-1]
                 detail = await self.enricher.fetch_wy_detail(wy_id) or {}
                 url = str(detail.get("cover") or "")
@@ -1116,10 +1121,10 @@ class MoeMusicService:
         #    接口（封面有独立的 cover_at 负缓存，见 _card_cover）。
         if need_year:
             wy_id = str(row.get("wy_id") or "")
-            if not fresh(wy_id, row.get("mapped_at")):
+            if not fresh(wy_id, row.get("mapped_at"), self._retry_ttl):
                 wy_id = await self.enricher.resolve_wy_id(track) or ""
                 await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
-            if wy_id and not fresh(row.get("year"), row.get("info_at")):
+            if wy_id and not fresh(row.get("year"), row.get("info_at"), self._retry_ttl):
                 wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
                 if wy_detail.get("cover"):
                     fields["cover_url"] = wy_detail["cover"]
@@ -1131,13 +1136,13 @@ class MoeMusicService:
         intro_pending = (
             need_intro
             and (not row.get("intro") or row.get("intro_source") != "llm")
-            and not fresh(None, row.get("info_at"))
+            and not fresh(None, row.get("info_at"), self._retry_ttl)
         )
         bio_pending = need_bio and not fresh(
-            artist.get("bio"), artist.get("attempt_at")
+            artist.get("bio"), artist.get("attempt_at"), self._retry_ttl
         )
         year_pending = need_year and not fields.get("year") and not fresh(
-            row.get("year"), row.get("info_at")
+            row.get("year"), row.get("info_at"), self._retry_ttl
         )
         if self.enricher is not None and (intro_pending or bio_pending or year_pending):
             data = await self.enricher.fetch_card_info(
@@ -1160,7 +1165,7 @@ class MoeMusicService:
                     artist_fields["source"] = "llm"
 
         # 3) 热评按曲目所在平台直取（wy/kw/kg），其余平台回退网易云同曲映射（接口）
-        if need_comment and not fresh(row.get("hot_comment"), row.get("info_at")):
+        if need_comment and not fresh(row.get("hot_comment"), row.get("info_at"), self._retry_ttl):
             comment, source = await self.enricher.fetch_hot_comment_for_track(track)
             if comment:
                 fields["hot_comment"] = comment["text"]

@@ -48,6 +48,7 @@
 | `song_card_intro` | 渲染：卡片显示歌曲简介 | `true` |
 | `song_card_artist_bio` | 渲染：卡片显示歌手简介（与歌曲简介同一次 LLM 调用生成） | `true` |
 | `song_card_comment` | 卡片补充热评第一条（网易云 / 酷我 / 酷狗，可能被限流） | `true` |
+| `info_retry_days` | 信息抓取**失败**后的重试间隔（天）；0 = 永不重试。成功缓存的数据永久保存 | `0` |
 | `song_card_repeat_sec` | 同会话同一首歌不重复发卡片的窗口（秒，0 = 每次都发） | `300` |
 | `proxy` | 网络代理（可选） | 空 |
 | `enable_self_test` | 启用「点歌自检」命令 | `true` |

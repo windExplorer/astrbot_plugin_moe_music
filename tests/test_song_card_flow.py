@@ -311,6 +311,55 @@ class TestBackgroundEnrich:
             assert enricher.llm_calls == 0
             assert enricher.detail_calls == 1
 
+    async def test_retry_ttl_zero_never_retries(self, tmp_path):
+        """info_retry_days=0（默认）：抓不到就永久跳过，隔了很久也不重试。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path, info_retry_days=0)
+            enricher.year = None
+            enricher.song_intro = None
+            enricher.bio = None
+            enricher.cover = None
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            detail_after_first = enricher.detail_calls
+            # 把尝试时间拨到 100 天前：默认「永不重试」下仍然跳过
+            row = await service.info_cache.get_song("wy:1")
+            await service.info_cache.upsert_song("wy:1", info_at=row["info_at"] - 100 * 86400)
+            artist = await service.info_cache.get_artist("歌手1")
+            await service.info_cache.upsert_artist(
+                "歌手1", attempt_at=artist["attempt_at"] - 100 * 86400
+            )
+            await service.handle_song_request(
+                MockEvent(umo="qq:GroupMessage:88888"), "晴天", index_hint=1
+            )
+            await drain_background(service)
+            assert enricher.detail_calls == detail_after_first
+            assert enricher.llm_calls == 1
+
+    async def test_retry_ttl_days_retries_after(self, tmp_path):
+        """info_retry_days>0：超过间隔后会再试一次（负缓存不是永久）。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path, info_retry_days=1)
+            enricher.year = None
+            enricher.song_intro = None
+            enricher.bio = None
+            enricher.cover = None
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            # 把尝试时间拨到 2 天前：超过 1 天的重试间隔 → 会重试
+            row = await service.info_cache.get_song("wy:1")
+            await service.info_cache.upsert_song("wy:1", info_at=row["info_at"] - 2 * 86400)
+            artist = await service.info_cache.get_artist("歌手1")
+            await service.info_cache.upsert_artist(
+                "歌手1", attempt_at=artist["attempt_at"] - 2 * 86400
+            )
+            await service.handle_song_request(
+                MockEvent(umo="qq:GroupMessage:88888"), "晴天", index_hint=1
+            )
+            await drain_background(service)
+            assert enricher.llm_calls == 2  # 重新尝试了一次
+            assert enricher.detail_calls >= 2  # 年份/封面详情也重试了
+
     async def test_llm_intro_stored_as_llm_source(self, tmp_path):
         """歌曲简介来自 LLM（intro_source=llm），一次调用同时覆盖歌手简介。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:

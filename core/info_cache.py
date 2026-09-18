@@ -25,7 +25,8 @@ from pathlib import Path
 
 from astrbot.api import logger
 
-# 抓取失败后的重试间隔：值为空时，这段时间内不再重复打外部接口 / LLM
+# 抓取失败后的默认重试间隔（秒）：值为空时，这段时间内不再重复打外部接口 / LLM。
+# 实际生效值由配置 info_retry_days 决定（0 = 永不重试），此常量仅作未传参时的兜底。
 RETRY_TTL_SEC = 7 * 86400
 
 _SONG_SCHEMA = """
@@ -213,18 +214,23 @@ class InfoCache:
             pass
 
 
-def fresh(value, attempted_at, ttl: float = RETRY_TTL_SEC) -> bool:
+def fresh(value, attempted_at, ttl: float | None = None) -> bool:
     """``值为空`` 时是否还在「别急着重试」的窗口内（负缓存判定）。
 
     Args:
         value: 已缓存的值（有值即视为新鲜，无需重试）。
-        attempted_at: 上次尝试时间（unix 秒，含失败）；缺失视为很久以前。
-        ttl: 重试间隔。
+        attempted_at: 上次尝试时间（unix 秒，含失败）；缺失视为从未尝试。
+        ttl: 重试间隔（秒）。None 用默认值；<= 0 表示空值结论**永久有效**
+            （抓不到就永远不再试，除非手动删库）。
     """
     if value:
         return True
     if not attempted_at:
         return False
+    if ttl is None:
+        ttl = RETRY_TTL_SEC
+    if ttl <= 0:
+        return True
     try:
         return (_now() - float(attempted_at)) < ttl
     except (TypeError, ValueError):

@@ -115,6 +115,7 @@ _EDITABLE_KEYS = {
     "song_card_intro",
     "song_card_llm_sync",
     "llm_provider_id",
+    "info_retry_days",
     "song_card_comment",
     "song_card_artist_bio",
     "song_card_repeat_sec",
