@@ -84,6 +84,18 @@ def _clean_text(text: str, limit: int = 0) -> str:
     return flat
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    """剥离简介里的 HTML 标签（网易云 description 常带 <br> 等）并解码常见实体。"""
+    flat = _HTML_TAG_RE.sub(" ", text or "")
+    entities = {"<br/>": " ", "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"'}
+    for entity, char in entities.items():
+        flat = flat.replace(entity, char)
+    return flat
+
+
 class Enricher:
     """信息卡片增强数据抓取器。"""
 
@@ -132,17 +144,17 @@ class Enricher:
             session = await self._ensure_session()
             async with session.get(url, proxy=self._proxy, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.debug(f"[萌音点歌] 外部接口返回 HTTP {resp.status}：{url}")
+                    logger.info(f"[萌音点歌] 外部接口返回 HTTP {resp.status}：{url}")
                     return None
                 data = await resp.json(content_type=None)
         except aiohttp.ClientError as e:
-            logger.debug(f"[萌音点歌] 外部接口请求失败：{type(e).__name__}: {e}")
+            logger.info(f"[萌音点歌] 外部接口请求失败：{type(e).__name__}: {e}")
             return None
         except asyncio.TimeoutError:
-            logger.debug(f"[萌音点歌] 外部接口超时（{self._fetch_timeout}s）：{url}")
+            logger.info(f"[萌音点歌] 外部接口超时（{self._fetch_timeout}s）：{url}")
             return None
         except Exception:
-            logger.debug(f"[萌音点歌] 外部接口解析异常：{url}")
+            logger.info(f"[萌音点歌] 外部接口解析异常（响应非 JSON？）：{url}")
             return None
         return data if isinstance(data, dict) else None
 
@@ -185,25 +197,38 @@ class Enricher:
         logger.debug(f"[萌音点歌] 同曲映射未命中（歌名/歌手不吻合）：《{track.display}》")
         return None
 
-    # ============ 2. 发行年份 ============
+    # ============ 2. 网易云歌曲详情（发行年份 + 专辑简介） ============
 
-    async def fetch_year(self, wy_id: str) -> int | None:
-        """取发行年份；接口结构与字段缺失都容错。"""
+    async def fetch_wy_detail(self, wy_id: str) -> dict:
+        """取网易云歌曲详情：``{"year": 发行年份或 None, "intro": 专辑简介或 None}``。
+
+        专辑简介（``album.description``）常带 HTML 标签，这里剥离后作为「歌曲简介」
+        的首选来源（比 LLM 生成可靠）；没有就交给 LLM。
+        """
         if not wy_id:
-            return None
+            return {}
         data = await self._get_json(f"/api/song/detail/?ids=[{wy_id}]&id={wy_id}")
         if not data:
-            return None
+            return {}
         songs = data.get("songs")
         if not isinstance(songs, list) or not songs:
-            return None
+            return {}
         song = songs[0] if isinstance(songs[0], dict) else {}
         album = song.get("album") if isinstance(song.get("album"), dict) else {}
+        detail: dict = {}
         for raw in (album.get("publishTime"), song.get("publishTime")):
             year = _year_of(raw)
             if year:
-                return year
-        return None
+                detail["year"] = year
+                break
+        intro = _strip_html(str(album.get("description") or ""))
+        if intro:
+            detail["intro"] = _clean_text(intro, 160)
+        return detail
+
+    async def fetch_year(self, wy_id: str) -> int | None:
+        """取发行年份（``fetch_wy_detail`` 的便捷封装，兼容旧调用）。"""
+        return (await self.fetch_wy_detail(wy_id)).get("year")
 
     # ============ 3. 热门评论（wy 直取；kw/kg 本平台直取；其余回退 wy 映射） ============
 
@@ -312,12 +337,34 @@ class Enricher:
                 return comment, "wy"
         return None, ""
 
-    # ============ 4. 歌手简介（LLM） ============
+    # ============ 4. 简介（LLM 兜底：歌手简介 / 歌曲简介） ============
 
     async def fetch_artist_bio(self, singer: str, umo: str | None = None) -> str | None:
         """用当前对话模型生成一句歌手简介；LLM 不可用 / 不认识则返回 None。"""
         singer = (singer or "").strip()
-        if not singer or self._provider_getter is None:
+        if not singer:
+            return None
+        prompt = (
+            f"请用一句话（不超过 60 字）介绍歌手「{singer}」：国籍或年代、音乐风格、"
+            "代表作或成就。不确定的信息不要编造；如果不知道这位歌手，只回复「暂无资料」。"
+        )
+        return await self._llm_one_liner(prompt, f"歌手：{singer}", umo)
+
+    async def fetch_song_intro(self, track: Track, umo: str | None = None) -> str | None:
+        """用当前对话模型生成一句歌曲简介；LLM 不可用 / 不认识则返回 None。"""
+        title = (track.name or "").strip()
+        if not title:
+            return None
+        who = f"（{track.singer} 演唱）" if track.singer else ""
+        prompt = (
+            f"请用一句话（不超过 60 字）介绍歌曲「{title}」{who}：创作背景、收录专辑、"
+            "发行年代或影响。不确定的信息不要编造；如果不知道这首歌，只回复「暂无资料」。"
+        )
+        return await self._llm_one_liner(prompt, f"歌曲：{title}", umo)
+
+    async def _llm_one_liner(self, prompt: str, label: str, umo: str | None = None) -> str | None:
+        """调当前对话模型生成一句话简介（歌手 / 歌曲共用），失败返回 None。"""
+        if self._provider_getter is None:
             return None
         try:
             provider = await self._provider_getter(umo)
@@ -325,29 +372,24 @@ class Enricher:
             logger.debug(f"[萌音点歌] 获取 LLM Provider 失败：{type(e).__name__}: {e}")
             return None
         if provider is None:
-            logger.debug("[萌音点歌] 没有可用的对话模型，跳过歌手简介")
+            logger.debug("[萌音点歌] 没有可用的对话模型，跳过简介生成")
             return None
-
-        prompt = (
-            f"请用一句话（不超过 60 字）介绍歌手「{singer}」：国籍或年代、音乐风格、"
-            "代表作或成就。不确定的信息不要编造；如果不知道这位歌手，只回复「暂无资料」。"
-        )
         try:
             resp = await asyncio.wait_for(
                 provider.text_chat(prompt=prompt, system_prompt=_BIO_SYSTEM_PROMPT),
                 timeout=self._llm_timeout,
             )
         except asyncio.TimeoutError:
-            logger.debug(f"[萌音点歌] 歌手简介生成超时（{self._llm_timeout}s）：{singer}")
+            logger.info(f"[萌音点歌] 简介生成超时（{self._llm_timeout}s）：{label}")
             return None
         except Exception as e:
-            logger.debug(f"[萌音点歌] 歌手简介生成失败：{type(e).__name__}: {e}")
+            logger.info(f"[萌音点歌] 简介生成失败：{type(e).__name__}: {e}（{label}）")
             return None
 
         text = _clean_text(str(getattr(resp, "completion_text", "") or ""), BIO_MAX_CHARS)
         text = text.strip("\"'“”‘’`* ")
         if not text or any(mark in text for mark in _BIO_NO_DATA):
-            logger.debug(f"[萌音点歌] 歌手简介无有效内容：{singer}")
+            logger.info(f"[萌音点歌] 简介无有效内容（{label}）")
             return None
         return text
 

@@ -33,12 +33,13 @@ CREATE TABLE IF NOT EXISTS song_meta (
     track_id          TEXT PRIMARY KEY,   -- 后端曲目 id，如 wy:186016
     wy_id             TEXT,               -- 映射到的网易云曲目 id（空 = 尚未成功映射）
     year              INTEGER,            -- 发行年份（空/0 = 未知）
+    intro             TEXT,               -- 歌曲简介（网易云专辑简介或 LLM 生成）
     hot_comment       TEXT,               -- 热评第一条正文
     hot_comment_user  TEXT,               -- 热评用户昵称
     hot_comment_likes INTEGER,            -- 热评点赞数
     hot_comment_source TEXT,              -- 热评来源平台码（wy/kw/kg）
     mapped_at         REAL,               -- 网易云 id 映射「尝试」完成时间（含失败）
-    info_at           REAL,               -- 年份 / 热评「尝试」完成时间（含失败）
+    info_at           REAL,               -- 年份 / 简介 / 热评「尝试」完成时间（含失败）
     updated_at        REAL                -- 最近一次成功写入时间
 );
 """
@@ -57,6 +58,7 @@ _SONG_COLUMNS = {
     "track_id",
     "wy_id",
     "year",
+    "intro",
     "hot_comment",
     "hot_comment_user",
     "hot_comment_likes",

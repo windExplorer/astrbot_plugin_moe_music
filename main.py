@@ -61,13 +61,13 @@ USAGE_HINT = (
     "用法：点歌 <歌名> [序号]\n"
     "也可以用：网易点歌 / QQ点歌 / 酷狗点歌 / 酷我点歌 / 咪咕点歌 <歌名>\n"
     "查歌词 / 下载：<歌名> 前加「歌词」或「下载」哦～\n"
-    "引用别人的歌曲分享再发「点歌 / 下载 / 歌词」，可直接点播 / 下载 / 查那首的歌词～"
+    "引用歌曲分享（或刚发的卡片）再发「点歌 / 下载 / 歌词」，可直接点播 / 下载 / 查歌词～"
 )
 
 FILE_USAGE_HINT = (
     "用法：点歌文件 <歌名> [序号]（也可直接说「下载 <歌名>」）\n"
     "也可以用：网易点歌文件 / QQ点歌文件 / 酷狗点歌文件 / 酷我点歌文件 / 咪咕点歌文件 <歌名>\n"
-    "引用别人的歌曲分享（或分享链接）再发「下载 / 点歌文件」，可直接下载那首歌的文件～\n"
+    "引用歌曲分享（或刚发的卡片）再发「下载 / 点歌文件」，可直接下载那首歌的文件～\n"
     "会下载音乐文件并写入封面与歌词（音质可在配置里单独调整）～"
 )
 
@@ -261,32 +261,64 @@ class MoeMusicPlugin(Star):
     async def _handle_quoted_share(
         self, event: AstrMessageEvent, *, kind: str = "play", command: str
     ) -> bool:
-        """「引用分享 + 指令（不带歌名）」：直接对引用里的分享卡片下手。
+        """「引用 + 指令（不带歌名）」：优先认音乐分享卡片/链接，其次认我们刚发的卡片。
+
+        引用**音乐分享**（json 卡片 / 分享链接）→ 按分享解析那首歌；
+        引用**我们发的信息卡片 / 语音 / 文件**（无法解析出分享信息的媒体消息）
+        → 用会话最近一次点歌的曲目还原（``service.last_track``，10 分钟内有效）。
 
         Args:
             kind: ``play`` 按分享策略发送（默认语音）/ ``file`` 下载文件 / ``lyrics`` 发歌词。
 
         Returns:
-            bool: 引用里是否识别到分享（True 表示本次请求已由分享链路接管）。
+            bool: 引用里是否识别到目标（True 表示本次请求已接管）。
         """
         try:
             share = extract_quoted_share(event.get_messages())
         except Exception:
             logger.warning(f"[萌音点歌] 引用分享识别异常：\n{traceback.format_exc()}")
-            return False
-        if share is None:
-            return False
+            share = None
+
+        track = None
+        if share is not None:
+            try:
+                if kind == "lyrics":
+                    await self.service.handle_share_lyrics(event, share)
+                else:
+                    await self.service.handle_share_request(
+                        event, share, file_mode=(kind == "file"), command=command
+                    )
+            except Exception:
+                logger.error(f"[萌音点歌] 引用分享处理异常：\n{traceback.format_exc()}")
+                await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
+            return True
+
+        # 引用我们发的卡片 / 语音 / 文件：内容里解析不出分享信息，用最近点歌记忆还原
+        if self._quoted_has_media(event):
+            track = self.service.last_track(event)
+            if track is not None:
+                try:
+                    await self.service.handle_track_request(
+                        event, track, file_mode=(kind == "file"), lyrics=(kind == "lyrics"), command=command
+                    )
+                except Exception:
+                    logger.error(f"[萌音点歌] 引用卡片处理异常：\n{traceback.format_exc()}")
+                    await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
+                return True
+            logger.info(f"[萌音点歌] 引用了媒体消息但会话内没有可用的最近点歌记录（{command}）")
+        return False
+
+    @staticmethod
+    def _quoted_has_media(event: AstrMessageEvent) -> bool:
+        """被引用的消息里是否含图片 / 语音 / 文件（我们发的卡片、语音、下载文件都是）。"""
         try:
-            if kind == "lyrics":
-                await self.service.handle_share_lyrics(event, share)
-            else:
-                await self.service.handle_share_request(
-                    event, share, file_mode=(kind == "file"), command=command
-                )
+            chain = []
+            for comp in event.get_messages() or []:
+                if type(comp).__name__ == "Reply":
+                    chain.extend(getattr(comp, "chain", None) or [])
+            return any(type(seg).__name__ in {"Image", "Record", "File"} for seg in chain)
         except Exception:
-            logger.error(f"[萌音点歌] 引用分享处理异常：\n{traceback.format_exc()}")
-            await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
-        return True
+            return False
 
     # ============ 命令 ============
 
@@ -387,7 +419,9 @@ class MoeMusicPlugin(Star):
             if await self._handle_quoted_share(event, kind="lyrics", command=cmd):
                 event.stop_event()
                 return
-            await event.send(event.plain_result("用法：查歌词 <歌名>（引用歌曲分享可直接查那首）"))
+            await event.send(
+                event.plain_result("用法：查歌词 <歌名>（引用歌曲分享或刚发的卡片可直接查那首）")
+            )
             event.stop_event()
             return
 

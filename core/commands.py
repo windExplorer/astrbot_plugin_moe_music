@@ -138,6 +138,8 @@ class MoeMusicService:
         self._card_sent_at: dict[tuple[str, str], float] = {}
         # 后台信息补齐任务（terminate 时统一取消，避免卸载后还在打外部接口）
         self._bg_tasks: set[asyncio.Task] = set()
+        # 会话 -> (最近一次点歌的曲目, 时间)：引用我们发的卡片/语音时还原曲目用
+        self._recent_tracks: dict[str, tuple[Track, float]] = {}
 
     def _note_candidate_diag(self, event: AstrMessageEvent, reason: str) -> None:
         """记下本次候选列表的撤回可行性结论（按会话维度）。"""
@@ -772,7 +774,9 @@ class MoeMusicService:
             event, track, record_ctx=record_ctx, timings=timings, options=delivery, song_card=card
         )
         if sent:
-            # 增强信息（年份/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
+            # 记住会话最近一次点歌：引用我们发的卡片/语音/文件时用来还原曲目
+            self._remember_track(event, track)
+            # 增强信息（年份/简介/热评/歌手简介）在后台补齐并只写缓存：不拖慢发歌，
             # 下次这首歌 / 这位歌手就能用上完整卡片
             self._schedule_enrich(track, getattr(event, "unified_msg_origin", None))
         if sent and delivery is None and self.cfg.enable_lyrics:
@@ -846,6 +850,7 @@ class MoeMusicService:
 
         return CardInfo(
             year=_int(row.get("year")),
+            intro=str(row.get("intro") or ""),
             artist_bio=str(artist.get("bio") or ""),
             hot_comment=str(row.get("hot_comment") or ""),
             hot_comment_user=str(row.get("hot_comment_user") or ""),
@@ -892,32 +897,62 @@ class MoeMusicService:
     async def _enrich_track(self, track: Track, umo: str | None) -> None:
         """补齐一首歌的增强信息（任何失败都只记日志，负缓存避免反复打接口）。"""
         try:
-            await self._enrich_song(track)
+            await self._enrich_song(track, umo)
             await self._enrich_artist(track, umo)
+            await self._log_enrich_result(track)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning(f"[萌音点歌] 信息补齐任务异常（已忽略）：\n{traceback.format_exc()}")
 
-    async def _enrich_song(self, track: Track) -> None:
-        """补网易云映射 id / 发行年份 / 热评。"""
-        need_year = self.cfg.song_card_year
-        need_comment = self.cfg.song_card_comment
-        if not (need_year or need_comment):
+    async def _log_enrich_result(self, track: Track) -> None:
+        """补齐结果一行说清（排查「卡片上怎么没有热评/简介」看这里就够）。"""
+        if self.info_cache is None:
             return
         row = await self.info_cache.get_song(track.id)
-        wy_id = str(row.get("wy_id") or "")
-        if not fresh(wy_id, row.get("mapped_at")):
-            wy_id = await self.enricher.resolve_wy_id(track) or ""
-            await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
-        if not wy_id:
-            return
+        artist = await self.info_cache.get_artist(track.singer) if track.singer else {}
+        comment = "无"
+        if row.get("hot_comment"):
+            comment = f"有({row.get('hot_comment_source') or 'wy'})"
+        logger.info(
+            f"[萌音点歌] 信息补齐完成：《{track.display}》"
+            f" 年份={row.get('year') or '无'}"
+            f" 简介={'有' if row.get('intro') else '无'}"
+            f" 热评={comment}"
+            f" 歌手简介={'有' if artist.get('bio') else '无'}"
+        )
 
+    async def _enrich_song(self, track: Track, umo: str | None = None) -> None:
+        """补网易云映射 id / 发行年份 / 歌曲简介 / 热评。"""
+        need_year = self.cfg.song_card_year
+        need_intro = self.cfg.song_card_intro
+        need_comment = self.cfg.song_card_comment
+        if not (need_year or need_intro or need_comment):
+            return
+        row = await self.info_cache.get_song(track.id)
         fields: dict = {"info_at": time.time()}
-        if need_year and not fresh(row.get("year"), row.get("info_at")):
-            year = await self.enricher.fetch_year(wy_id)
-            if year:
-                fields["year"] = year
+
+        # 年份 + 歌曲简介：一次网易云详情调用同时拿（简介缺 album 文案时 LLM 兜底）
+        wy_detail: dict = {}
+        if need_year or need_intro:
+            wy_id = str(row.get("wy_id") or "")
+            if not fresh(wy_id, row.get("mapped_at")):
+                wy_id = await self.enricher.resolve_wy_id(track) or ""
+                await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
+            if wy_id and (
+                not fresh(row.get("year"), row.get("info_at"))
+                or not fresh(row.get("intro"), row.get("info_at"))
+            ):
+                wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
+            if need_year and not fresh(row.get("year"), row.get("info_at")) and wy_detail.get("year"):
+                fields["year"] = wy_detail["year"]
+            if need_intro and not fresh(row.get("intro"), row.get("info_at")):
+                intro = wy_detail.get("intro")
+                if not intro:
+                    intro = await self.enricher.fetch_song_intro(track, umo)
+                if intro:
+                    fields["intro"] = intro
+
         # 热评按曲目所在平台直取（wy/kw/kg），其余平台回退网易云同曲映射
         if need_comment and not fresh(row.get("hot_comment"), row.get("info_at")):
             comment, source = await self.enricher.fetch_hot_comment_for_track(track)
@@ -927,6 +962,68 @@ class MoeMusicService:
                 fields["hot_comment_likes"] = comment["likes"]
                 fields["hot_comment_source"] = source
         await self.info_cache.upsert_song(track.id, **fields)
+
+    # ============ 会话最近点歌记忆（引用卡片/语音还原曲目） ============
+
+    CARD_QUOTE_TTL = 600
+    """引用我们发的卡片 / 语音 / 文件时，能用会话最近一次点歌还原曲目的时间窗（秒）。"""
+
+    def _remember_track(self, event: AstrMessageEvent, track: Track) -> None:
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            return
+        if not umo:
+            return
+        now = time.monotonic()
+        self._recent_tracks[umo] = (track, now)
+        expired = [k for k, (_t, ts) in self._recent_tracks.items() if now - ts > self.CARD_QUOTE_TTL * 4]
+        for key in expired:
+            self._recent_tracks.pop(key, None)
+
+    def last_track(self, event: AstrMessageEvent) -> Track | None:
+        """会话内最近一次点歌的曲目；超过 ``CARD_QUOTE_TTL`` 或没有记录返回 None。"""
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+        except Exception:
+            return None
+        entry = self._recent_tracks.get(umo)
+        if not entry:
+            return None
+        track, ts = entry
+        if time.monotonic() - ts > self.CARD_QUOTE_TTL:
+            return None
+        return track
+
+    async def handle_track_request(
+        self,
+        event: AstrMessageEvent,
+        track: Track,
+        *,
+        file_mode: bool = False,
+        lyrics: bool = False,
+        command: str = "",
+    ) -> bool:
+        """对已解析出的曲目执行发送 / 下载 / 查歌词（引用我们发的卡片等场景）。"""
+        ctx = await self._collect_context(event)
+        if not await self._check_access(event, ctx):
+            return False
+        if lyrics:
+            return await self.send_lyrics_for_track(event, track)
+        delivery = self._file_delivery() if file_mode else self._share_delivery()
+        return await self._send_via_queue(
+            event,
+            track,
+            record_ctx={
+                "trigger_type": "share",
+                "command": command,
+                "keyword": track.display,
+                "selected_index": 1,
+                "selection_type": "share",
+                **ctx,
+            },
+            delivery=delivery,
+        )
 
     async def _enrich_artist(self, track: Track, umo: str | None) -> None:
         """补歌手简介（LLM，歌手维度复用：同一位歌手只生成一次）。"""

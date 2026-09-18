@@ -127,6 +127,27 @@ class TestFetchYear:
     async def test_parses_millisecond_timestamp(self, wy_server):
         assert await make_enricher().fetch_year("186016") == 2003
 
+    async def test_detail_returns_year_and_intro(self, wy_server):
+        """网易云详情一次拿年份和专辑简介（简介剥离 HTML 标签）。"""
+        wy_server["detail"] = {
+            "songs": [
+                {
+                    "album": {
+                        "publishTime": 1062864000000,
+                        "description": "第一行<br/>第二行 &amp; 彩蛋",
+                    }
+                }
+            ]
+        }
+        detail = await make_enricher().fetch_wy_detail("1")
+        assert detail["year"] == 2003
+        assert detail["intro"] == "第一行 第二行 & 彩蛋"
+
+    async def test_detail_without_intro(self, wy_server):
+        wy_server["detail"] = {"songs": [{"album": {"publishTime": 1062864000000, "description": ""}}]}
+        detail = await make_enricher().fetch_wy_detail("1")
+        assert detail["year"] == 2003 and "intro" not in detail
+
     async def test_parses_second_timestamp(self, wy_server):
         wy_server["detail"] = {"songs": [{"publishTime": int(time.time())}]}
         assert await make_enricher().fetch_year("1") == time.localtime().tm_year
@@ -311,4 +332,31 @@ class TestArtistBio:
     async def test_blank_singer_skipped(self):
         provider = FakeProvider("x")
         assert await make_enricher(provider=provider).fetch_artist_bio("   ") is None
+        assert provider.prompts == []
+
+
+class TestSongIntro:
+    """歌曲简介的 LLM 兜底（首选是网易云专辑简介，见 TestFetchYear）。"""
+
+    async def test_intro_returned(self):
+        provider = FakeProvider(" 收录于 2004 年专辑《七里香》，流行抒情代表作。 ")
+        intro = await make_enricher(provider=provider).fetch_song_intro(make_track())
+        assert intro and "七里香" in intro
+        assert "晴天" in provider.prompts[0] and "周杰伦" in provider.prompts[0]
+
+    async def test_no_data_or_error_skipped(self):
+        import asyncio
+
+        assert await make_enricher(provider=FakeProvider("暂无资料")).fetch_song_intro(make_track()) is None
+        assert await make_enricher(
+            provider=FakeProvider(error=asyncio.TimeoutError())
+        ).fetch_song_intro(make_track()) is None
+        assert await make_enricher(provider=None).fetch_song_intro(make_track()) is None
+
+    async def test_no_title_skipped(self):
+        from types import SimpleNamespace
+
+        provider = FakeProvider("x")
+        bare = SimpleNamespace(name="  ", singer="", source="wy", id="wy:1", display="x")
+        assert await make_enricher(provider=provider).fetch_song_intro(bare) is None
         assert provider.prompts == []

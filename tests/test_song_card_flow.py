@@ -44,13 +44,15 @@ class FakeCardRenderer:
 class FakeEnricher:
     """假增强抓取器：记录调用次数，便于断言负缓存是否生效。"""
 
-    def __init__(self, wy_id="186016", year=2014, comment=None, bio="测试歌手简介"):
+    def __init__(self, wy_id="186016", year=2014, intro="测试歌曲简介", comment=None, bio="测试歌手简介"):
         self.wy_id = wy_id
         self.year = year
+        self.intro = intro
         self.comment = comment
         self.bio = bio
         self.wy_calls = 0
-        self.year_calls = 0
+        self.detail_calls = 0
+        self.intro_calls = 0
         self.comment_calls = 0
         self.bio_calls: list[str] = []
 
@@ -58,9 +60,22 @@ class FakeEnricher:
         self.wy_calls += 1
         return self.wy_id
 
+    async def fetch_wy_detail(self, wy_id):
+        self.detail_calls += 1
+        detail = {}
+        if self.year:
+            detail["year"] = self.year
+        if self.intro:
+            detail["intro"] = self.intro
+        return detail
+
     async def fetch_year(self, wy_id):
         self.year_calls += 1
         return self.year
+
+    async def fetch_song_intro(self, track, umo=None):
+        self.intro_calls += 1
+        return self.intro or None
 
     async def fetch_hot_comment(self, wy_id):
         self.comment_calls += 1
@@ -211,10 +226,11 @@ class TestBackgroundEnrich:
             await service.handle_song_request(event, "晴天", index_hint=1)
             await drain_background(service)
 
-            assert enricher.year_calls == 1
+            assert enricher.detail_calls == 1
             assert enricher.bio_calls == ["歌手1"]
             row = await service.info_cache.get_song("wy:1")
             assert row["year"] == 2014
+            assert row["intro"] == "测试歌曲简介"
             assert row["wy_id"] == "186016"
             artist = await service.info_cache.get_artist("歌手1")
             assert artist["bio"] == "测试歌手简介"
@@ -225,6 +241,7 @@ class TestBackgroundEnrich:
             )
             info: CardInfo = renderer.calls[-1]["info"]
             assert info.year == 2014
+            assert info.intro == "测试歌曲简介"
             assert info.artist_bio == "测试歌手简介"
 
     async def test_hot_comment_cached_when_enabled(self, tmp_path):
@@ -244,18 +261,20 @@ class TestBackgroundEnrich:
                 api,
                 tmp_path,
                 song_card_year=False,
+                song_card_intro=False,
                 song_card_comment=False,
                 song_card_artist_bio=False,
             )
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
-            assert (enricher.wy_calls, enricher.year_calls, enricher.bio_calls) == (0, 0, [])
+            assert (enricher.wy_calls, enricher.detail_calls, enricher.bio_calls) == (0, 0, [])
 
     async def test_failed_fetch_not_retried_on_next_play(self, tmp_path):
         """抓不到也要记时间戳：否则每次点这首歌都会重打一遍外部接口。"""
         async with FakeBackend(search_result=[track_json(1)]) as api:
             service, _, enricher = make_service(api, tmp_path)
             enricher.year = None
+            enricher.intro = None
             enricher.bio = None
             await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
             await drain_background(service)
@@ -263,8 +282,79 @@ class TestBackgroundEnrich:
                 MockEvent(umo="qq:GroupMessage:88888"), "晴天", index_hint=1
             )
             await drain_background(service)
-            assert enricher.year_calls == 1  # 负缓存生效，不再重试
+            assert enricher.detail_calls == 1  # 负缓存生效，不再重试
+            assert enricher.intro_calls == 1  # LLM 简介同样只试一次
             assert enricher.bio_calls == ["歌手1"]
+
+
+class TestRecentTrackQuote:
+    """「引用我们发的卡片 / 语音 / 文件 + 指令」：用会话最近一次点歌还原曲目。"""
+
+    class _Event(MockEvent):
+        def __init__(self, components=None, **kwargs):
+            super().__init__(**kwargs)
+            self._components = components or []
+
+        def get_messages(self):
+            return self._components
+
+    def reply(self, chain):
+        return COMPONENTS.Reply(id=1, chain=chain)
+
+    def image_component(self):
+        return COMPONENTS.Image(file=b"card-bytes")
+
+    async def test_quote_card_download(self, tmp_path):
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, renderer, _ = make_service(api, tmp_path)
+            first = MockEvent()
+            await service.handle_song_request(first, "晴天", index_hint=1)
+
+            captured: dict = {}
+
+            async def _spy(event, track, record_ctx=None, timings=None, options=None, song_card=None):
+                captured["track"] = track
+                captured["options"] = options
+                return True
+
+            service.sender.send_track = _spy
+            event = self._Event(message_str="下载", components=[self.reply([self.image_component()])])
+            await service.handle_track_request(
+                event, service.last_track(event), file_mode=True, command="下载"
+            )
+            assert captured["track"].id == "wy:1"
+            assert captured["options"].modes == ["file_local"]
+
+    async def test_quote_card_lyrics_and_replay(self, tmp_path):
+        lrc = "[00:01.00]故事的小黄花"
+        async with FakeBackend(search_result=[track_json(1)], lyric_text=lrc) as api:
+            service, _, _ = make_service(api, tmp_path)
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            track = service.last_track(MockEvent())
+            assert track is not None and track.id == "wy:1"
+
+            # 歌词：图片消息链
+            lyrics_event = self._Event(components=[self.reply([self.image_component()])])
+            assert await service.handle_track_request(
+                lyrics_event, track, lyrics=True, command="歌词"
+            )
+            assert any(isinstance(seg, COMPONENTS.Image) for seg in lyrics_event.sent[-1][1])
+
+            # 点歌：按分享策略重发一遍（默认语音）
+            replay = self._Event(components=[self.reply([self.image_component()])])
+            assert await service.handle_track_request(replay, track, command="点歌")
+            seg = replay.sent[0][1][0]
+            assert getattr(seg, "file", "") == "http://h/api/temp/t"
+
+    async def test_recent_track_expires(self, tmp_path):
+
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, _ = make_service(api, tmp_path)
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            umo = MockEvent().unified_msg_origin
+            track, ts = service._recent_tracks[umo]
+            service._recent_tracks[umo] = (track, ts - 601)  # 超过 TTL
+            assert service.last_track(MockEvent()) is None
 
     async def test_no_cache_no_card_info(self, tmp_path):
         """缓存不可用（None）时卡片照样发，只是没有增强信息。"""

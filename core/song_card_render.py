@@ -38,6 +38,9 @@ class CardInfo:
     """卡片上的增强信息（全部来自缓存，取不到就留空）。"""
 
     year: int = 0
+    intro: str = ""
+    """歌曲简介（网易云专辑简介，或 LLM 生成）。"""
+
     artist_bio: str = ""
     hot_comment: str = ""
     hot_comment_user: str = ""
@@ -46,7 +49,7 @@ class CardInfo:
 
     @property
     def empty(self) -> bool:
-        return not (self.year or self.artist_bio or self.hot_comment)
+        return not (self.year or self.artist_bio or self.hot_comment or self.intro)
 
     @property
     def comment_source_name(self) -> str:
@@ -204,6 +207,9 @@ class SongCardRenderer:
             if info.artist_bio
             else []
         )
+        intro_lines = (
+            self._wrap(probe, _flat(info.intro), self.body_font, inner, 3) if info.intro else []
+        )
         comment_lines = (
             self._wrap(probe, f"「{_flat(info.hot_comment)}」", self.body_font, inner, 3)
             if info.hot_comment
@@ -217,6 +223,8 @@ class SongCardRenderer:
         height += 14 + meta_lh * len(meta_lines)
         if bio_lines:
             height += 26 + section_lh + body_lh * len(bio_lines)
+        if intro_lines:
+            height += 26 + section_lh + body_lh * len(intro_lines)
         if comment_lines:
             height += 26 + section_lh + body_lh * len(comment_lines)
             if info.hot_comment_user:
@@ -250,9 +258,18 @@ class SongCardRenderer:
         # ---- 歌手简介 ----
         if bio_lines:
             y += 26
-            painter.text((_PAD, y), "歌手简介 · AI 生成", font=self.section_font, fill=self.section_color)
+            painter.text((_PAD, y), "歌手简介", font=self.section_font, fill=self.section_color)
             y += section_lh
             for line in bio_lines:
+                painter.text((_PAD, y), line, font=self.body_font, fill=self.body_color)
+                y += body_lh
+
+        # ---- 歌曲简介 ----
+        if intro_lines:
+            y += 26
+            painter.text((_PAD, y), "歌曲简介", font=self.section_font, fill=self.section_color)
+            y += section_lh
+            for line in intro_lines:
                 painter.text((_PAD, y), line, font=self.body_font, fill=self.body_color)
                 y += body_lh
 
@@ -284,7 +301,7 @@ class SongCardRenderer:
         self._centered(
             painter,
             footer_y + 26,
-            "提示：引用歌曲分享可发 下载 / 歌词 / 点歌",
+            "提示：引用歌曲分享或本卡片可发 下载 / 歌词 / 点歌",
             self.hint_font,
             self.footer_color,
         )
