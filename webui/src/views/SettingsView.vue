@@ -46,6 +46,16 @@ const GROUPS: Array<{ title: string; keys: string[] }> = [
     title: "分享识别（QQ音乐 / 网易云 / 酷狗 / 酷我）",
     keys: ["share_auto_play", "share_send_modes", "share_quality"],
   },
+  {
+    title: "歌曲信息卡片",
+    keys: [
+      "song_card_enable",
+      "song_card_year",
+      "song_card_comment",
+      "song_card_artist_bio",
+      "song_card_repeat_sec",
+    ],
+  },
   { title: "队列", keys: ["queue_concurrency", "queue_max_pending"] },
   { title: "访问控制（白/黑名单，白名单优先）", keys: ["whitelist_groups", "whitelist_users", "blacklist_groups", "blacklist_users"] },
   { title: "其他", keys: ["enable_self_test"] },

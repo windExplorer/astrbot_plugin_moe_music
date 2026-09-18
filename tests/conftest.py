@@ -228,3 +228,18 @@ sys.path.insert(0, str(PLUGIN_ROOT.parent))
 @pytest.fixture()
 def event_loop_policy():
     return asyncio.get_event_loop_policy()
+
+
+@pytest.fixture(autouse=True)
+def _offline_external_calls(monkeypatch):
+    """测试绝不打真实外部接口。
+
+    歌曲信息卡片的增强信息会请求网易云公开接口——真实运行没问题，但测试必须离线
+    且确定：把 ``WY_API_BASE`` 指向本机关闭端口（连接立即被拒，秒失败）。需要假
+    网易云服务的测试（tests/test_enrich.py）会在自己的 fixture 里覆盖它。
+    """
+    try:
+        from astrbot_plugin_moe_music.core import enrich
+    except Exception:  # pragma: no cover - stub 环境异常时不拖累其他测试
+        return
+    monkeypatch.setattr(enrich, "WY_API_BASE", "http://127.0.0.1:1")

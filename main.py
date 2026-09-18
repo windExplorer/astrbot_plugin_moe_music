@@ -29,10 +29,13 @@ from .core.access import AccessController
 from .core.api_client import ApiError, MusicApiClient
 from .core.commands import MoeMusicService
 from .core.config import LLM_SOURCE_ALIAS, PluginConfig, resolve_command_source
+from .core.enrich import Enricher
+from .core.info_cache import InfoCache
 from .core.lyrics_render import LyricsRenderer
 from .core.queue import SongTaskQueue
 from .core.sender import SongSender
 from .core.share import extract_quoted_share, extract_share
+from .core.song_card_render import SongCardRenderer
 from .core.songlist_render import SonglistRenderer
 from .core.storage import RecordStore
 
@@ -50,19 +53,21 @@ SONG_COMMAND_ALIASES = {
     "咪咕点歌",
 }
 
-# 「点歌文件」指令全部别名：与点歌别名同构（点歌名 + “文件”），含大小写变体
-FILE_COMMAND_ALIASES = {f"{name}文件" for name in SONG_COMMAND_ALIASES}
+# 「点歌文件」指令全部别名：与点歌别名同构（点歌名 + “文件”），含大小写变体；
+# 「下载」是它的短别名（主要配合「引用分享 + 下载」使用）
+FILE_COMMAND_ALIASES = {f"{name}文件" for name in SONG_COMMAND_ALIASES} | {"下载"}
 
 USAGE_HINT = (
     "用法：点歌 <歌名> [序号]\n"
     "也可以用：网易点歌 / QQ点歌 / 酷狗点歌 / 酷我点歌 / 咪咕点歌 <歌名>\n"
-    "查歌词：<歌名> 前加「查歌词」哦～"
+    "查歌词 / 下载：<歌名> 前加「歌词」或「下载」哦～\n"
+    "引用别人的歌曲分享再发「点歌 / 下载 / 歌词」，可直接点播 / 下载 / 查那首的歌词～"
 )
 
 FILE_USAGE_HINT = (
-    "用法：点歌文件 <歌名> [序号]\n"
+    "用法：点歌文件 <歌名> [序号]（也可直接说「下载 <歌名>」）\n"
     "也可以用：网易点歌文件 / QQ点歌文件 / 酷狗点歌文件 / 酷我点歌文件 / 咪咕点歌文件 <歌名>\n"
-    "引用别人的歌曲分享再发这条指令，可直接下载那首歌的文件～\n"
+    "引用别人的歌曲分享（或分享链接）再发「下载 / 点歌文件」，可直接下载那首歌的文件～\n"
     "会下载音乐文件并写入封面与歌词（音质可在配置里单独调整）～"
 )
 
@@ -84,7 +89,10 @@ class MoeMusicPlugin(Star):
         # 临时下载目录：优先 AstrBot 临时目录，失败退回系统临时目录
         self.download_dir = Path(self._resolve_temp_dir()) / "moe_music" / uuid.uuid4().hex[:8]
         # 记录库：存 AstrBot 数据目录（不随插件卸载删除，供后续统计）
-        self.store = RecordStore(Path(self._resolve_data_dir()) / "moe_music" / "records.db")
+        data_db = Path(self._resolve_data_dir()) / "moe_music" / "records.db"
+        self.store = RecordStore(data_db)
+        # 信息缓存库（歌曲/歌手增强信息，歌曲信息卡片用）：与记录库同文件、独立表
+        self.info_cache = InfoCache(data_db)
         self.access = AccessController(self.cfg)
         # 点歌任务队列：限制并发、队满拒绝，排队耗时入统计
         self.queue = SongTaskQueue(self.cfg.queue_concurrency, self.cfg.queue_max_pending)
@@ -92,6 +100,10 @@ class MoeMusicPlugin(Star):
         font_path = Path(__file__).parent / "fonts" / "simhei.ttf"
         self.lyrics_renderer = LyricsRenderer(font_path)
         self.songlist_renderer = SonglistRenderer(font_path)
+        self.song_card_renderer = SongCardRenderer(font_path)
+        self.enricher = Enricher(
+            self.api, proxy=self.cfg.proxy, provider_getter=self._llm_provider_for
+        )
         self.service = MoeMusicService(
             self.cfg,
             self.api,
@@ -101,7 +113,20 @@ class MoeMusicPlugin(Star):
             store=self.store,
             access=self.access,
             queue=self.queue,
+            card_renderer=self.song_card_renderer,
+            info_cache=self.info_cache,
+            enricher=self.enricher,
         )
+
+    async def _llm_provider_for(self, umo: str | None = None):
+        """取当前会话的对话模型（歌手简介用）；没有可用模型时返回 None。"""
+        if self.context is None:
+            return None
+        try:
+            return await self.context.get_using_provider_async(umo)
+        except Exception as e:
+            logger.debug(f"[萌音点歌] 获取对话模型失败：{type(e).__name__}: {e}")
+            return None
 
     @staticmethod
     def _resolve_data_dir() -> str:
@@ -169,6 +194,8 @@ class MoeMusicPlugin(Star):
         self.sender.api = new_api
         self.service.cfg = self.cfg
         self.service.api = new_api
+        self.enricher.api = new_api
+        self.enricher.set_proxy(self.cfg.proxy)
         self.access = AccessController(self.cfg)
         self.service.access = self.access
         logger.info(f"[萌音点歌] 已通过 WebUI 更新配置：{sorted(clean)}（队列并发数等结构性配置重启后生效）")
@@ -187,10 +214,13 @@ class MoeMusicPlugin(Star):
             logger.warning("[萌音点歌] 启动自检异常（网络不可达？）")
 
     async def terminate(self):
-        """插件卸载：停止队列、释放 HTTP 会话、关闭记录库并清理临时目录。"""
+        """插件卸载：停后台补齐任务与队列、释放 HTTP 会话、关库并清理临时目录。"""
+        await self.service.shutdown_background()
         await self.queue.stop()
         await self.api.close()
+        await self.enricher.close()
         await self.store.close()
+        await self.info_cache.close()
         self.sender.cleanup_download_dir()
 
     # ============ 分享识别 ============
@@ -229,9 +259,12 @@ class MoeMusicPlugin(Star):
             return None
 
     async def _handle_quoted_share(
-        self, event: AstrMessageEvent, *, file_mode: bool, command: str
+        self, event: AstrMessageEvent, *, kind: str = "play", command: str
     ) -> bool:
-        """「引用分享 + 点歌指令（不带歌名）」：直接对引用里的分享卡片下手。
+        """「引用分享 + 指令（不带歌名）」：直接对引用里的分享卡片下手。
+
+        Args:
+            kind: ``play`` 按分享策略发送（默认语音）/ ``file`` 下载文件 / ``lyrics`` 发歌词。
 
         Returns:
             bool: 引用里是否识别到分享（True 表示本次请求已由分享链路接管）。
@@ -244,9 +277,12 @@ class MoeMusicPlugin(Star):
         if share is None:
             return False
         try:
-            await self.service.handle_share_request(
-                event, share, file_mode=file_mode, command=command
-            )
+            if kind == "lyrics":
+                await self.service.handle_share_lyrics(event, share)
+            else:
+                await self.service.handle_share_request(
+                    event, share, file_mode=(kind == "file"), command=command
+                )
         except Exception:
             logger.error(f"[萌音点歌] 引用分享处理异常：\n{traceback.format_exc()}")
             await event.send(event.plain_result("这首歌暂时发不出来，稍后再试试吧～"))
@@ -278,7 +314,7 @@ class MoeMusicPlugin(Star):
 
         if not arg:
             # 「引用分享 + 点歌」：把引用里的歌当成歌名
-            if await self._handle_quoted_share(event, file_mode=False, command=cmd):
+            if await self._handle_quoted_share(event, kind="play", command=cmd):
                 event.stop_event()
                 return
             await event.send(event.plain_result(USAGE_HINT))
@@ -320,8 +356,8 @@ class MoeMusicPlugin(Star):
             arg = " ".join(tokens[:-1])
 
         if not arg:
-            # 「引用分享 + 点歌文件」：下载引用里那首歌的文件本体
-            if await self._handle_quoted_share(event, file_mode=True, command=cmd):
+            # 「引用分享 + 点歌文件 / 下载」：下载引用里那首歌的文件本体
+            if await self._handle_quoted_share(event, kind="file", command=cmd):
                 event.stop_event()
                 return
             await event.send(event.plain_result(FILE_USAGE_HINT))
@@ -338,16 +374,20 @@ class MoeMusicPlugin(Star):
         finally:
             event.stop_event()
 
-    @filter.command("查歌词", alias={"查看歌词"})
+    @filter.command("查歌词", alias={"查看歌词", "歌词"})
     async def lyrics_command(self, event: AstrMessageEvent):
-        """查歌词 / 查看歌词 <歌名>，返回歌词图片"""
+        """查歌词 / 查看歌词 / 歌词 <歌名>，返回歌词图片；引用歌曲分享可直接查那首"""
 
         if not self._check_ready(event):
             return
 
         cmd, _, arg = event.message_str.strip().partition(" ")
         if not arg.strip():
-            await event.send(event.plain_result("用法：查歌词 <歌名>"))
+            # 「引用分享 + 歌词」：查引用里那首歌的歌词
+            if await self._handle_quoted_share(event, kind="lyrics", command=cmd):
+                event.stop_event()
+                return
+            await event.send(event.plain_result("用法：查歌词 <歌名>（引用歌曲分享可直接查那首）"))
             event.stop_event()
             return
 

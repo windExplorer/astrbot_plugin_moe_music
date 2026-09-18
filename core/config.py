@@ -135,6 +135,12 @@ class PluginConfig:
     share_auto_play: bool = False
     share_send_modes: list[str] = field(default_factory=lambda: ["record_link", "text"])
     share_quality: str = "320k"  # 分享识别取链音质（语音会被 QQ 转码，320k 通常足够）
+    # 歌曲信息卡片：点歌成功后先发卡片（图片）、再发音频
+    song_card_enable: bool = True  # 是否发送卡片
+    song_card_year: bool = True  # 用网易云公开接口补发行年份
+    song_card_comment: bool = True  # 补热评第一条（wy/kw/kg 直取，失败静默跳过）
+    song_card_artist_bio: bool = True  # 用 LLM 生成歌手简介（无可用模型时自动跳过）
+    song_card_repeat_sec: int = 300  # 同会话同一首歌在此秒数内不重复发卡片（0 = 每次都发）
     proxy: str = ""
     enable_self_test: bool = True
     # 访问控制：白名单优先于黑名单；两者都为空时不限制
@@ -212,6 +218,11 @@ class PluginConfig:
             share_auto_play=bool(config.get("share_auto_play", False)),
             share_send_modes=share_send_modes,
             share_quality=share_quality,
+            song_card_enable=bool(config.get("song_card_enable", True)),
+            song_card_year=bool(config.get("song_card_year", True)),
+            song_card_comment=bool(config.get("song_card_comment", True)),
+            song_card_artist_bio=bool(config.get("song_card_artist_bio", True)),
+            song_card_repeat_sec=_int_opt("song_card_repeat_sec", 300, 0, 3600),
             proxy=str(config.get("proxy", "") or "").strip(),
             enable_self_test=bool(config.get("enable_self_test", True)),
             whitelist_groups=_str_list("whitelist_groups"),

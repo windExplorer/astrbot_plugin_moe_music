@@ -128,8 +128,9 @@ class SongSender:
         record_ctx: dict | None = None,
         timings: dict | None = None,
         options: DeliveryOptions | None = None,
+        song_card: bytes | None = None,
     ) -> bool:
-        """发送一首歌：解析播放链接（含音质收敛）→ 按发送方式降级发送。
+        """发送一首歌：解析播放链接（含音质收敛）→ 先发信息卡片 → 按发送方式降级发送。
 
         Args:
             record_ctx: 点歌记录上下文（用户/会话/选歌方式等），发送成功后
@@ -139,6 +140,8 @@ class SongSender:
                      send_ms / queue_wait_ms / total_ms / metadata_embedded。
             options: 发送策略覆盖（音质 / 发送方式 / 是否嵌入元数据）；
                      None = 使用插件配置的默认策略（普通点歌）。
+            song_card: 歌曲信息卡片图片字节（可选）。在**取链成功之后、音频之前**发送，
+                     因此不会出现「有卡片没歌」；发送失败只记日志，不影响发歌。
 
         Returns:
             bool: 是否发送成功。
@@ -177,6 +180,10 @@ class SongSender:
         timings["quality_requested"] = wanted_quality
         timings["quality_fallback"] = int(quality != wanted_quality)
         timings["expires_at"] = str(audio.get("expiresAt") or "") or None
+
+        # 歌曲信息卡片：取链已成功，此时发卡片不会再出现「有卡片没歌」的尴尬
+        if song_card:
+            await self._send_song_card(event, track, song_card)
 
         for mode in modes:
             t0 = time.monotonic()
@@ -223,6 +230,19 @@ class SongSender:
             )
         )
         return False
+
+    # ============ 歌曲信息卡片 ============
+
+    async def _send_song_card(self, event, track: Track, image_bytes: bytes) -> None:
+        """发送歌曲信息卡片。
+
+        卡片是「锦上添花」：任何失败都只记日志，绝不阻断后面的发歌。
+        """
+        try:
+            await event.send(event.chain_result([Image.fromBytes(image_bytes)]))
+            logger.info(f"[萌音点歌] 已发送歌曲信息卡片：《{track.display}》")
+        except Exception:
+            logger.warning(f"[萌音点歌] 信息卡片发送失败（不影响发歌）：\n{traceback.format_exc()}")
 
     # ============ 播放链接解析 ============
 

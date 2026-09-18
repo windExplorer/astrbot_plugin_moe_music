@@ -220,11 +220,59 @@ class TestSendTrackFallback:
             assert event.sent[-1] == ("plain", "网络开小差了，请稍后重试～")
 
 
-class TestLocalFilename:
-    """本地文件命名：歌名 - 歌手.扩展名，无随机后缀。"""
+class TestSongCard:
+    """歌曲信息卡片：在音频之前发送，且本身失败不能影响发歌。"""
 
-    async def test_clean_filename_no_hash(self, tmp_path):
-        async with FakeUrlBackend([ok_url("flac")], audio_bytes=b"ID3fake-flac-audio") as api:
+    class _FlakyEvent(MockEvent):
+        """第一次 send 抛错（模拟卡片发送失败），之后正常。"""
+
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def send(self, result):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("card send boom")
+            return await super().send(result)
+
+    async def test_card_sent_before_audio(self):
+        async with FakeUrlBackend([ok_url("320k")]) as api:
+            sender = make_sender(api, modes=["text"])
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track(), song_card=b"CARD-BYTES")
+            assert ok
+            assert len(event.sent) == 2
+            card_chain = event.sent[0][1]
+            assert getattr(card_chain[0], "file", None) == b"CARD-BYTES"
+            assert event.sent[1][0] == "chain"  # 音频（text 模式的链接消息）
+
+    async def test_card_failure_does_not_block_audio(self):
+        async with FakeUrlBackend([ok_url("320k")]) as api:
+            sender = make_sender(api, modes=["text"])
+            event = self._FlakyEvent()
+            ok = await sender.send_track(event, make_track(), song_card=b"CARD-BYTES")
+            assert ok  # 卡片发失败，歌照发
+            assert len(event.sent) == 1
+
+    async def test_no_card_when_not_given(self):
+        async with FakeUrlBackend([ok_url("320k")]) as api:
+            sender = make_sender(api, modes=["text"])
+            event = MockEvent()
+            await sender.send_track(event, make_track())
+            assert len(event.sent) == 1
+
+
+class TestLocalFilename:
+    """本地文件命名：歌名 - 歌手.扩展名，无随机后缀；扩展名按**真实容器**校正。"""
+
+    async def test_container_mismatch_uses_real_ext(self, tmp_path):
+        """请求 flac 但内容是 mp3（带 ID3 标签）→ 按真实容器命名。
+
+        线上报错即此场景：按 `.flac` 命名会让 mutagen 用 FLAC 写入器处理 m4a/mp3，
+        直接抛 `FLACNoHeaderError: is not a valid FLAC file`。
+        """
+        async with FakeUrlBackend([ok_url("flac")], audio_bytes=b"ID3fake-mp3-audio") as api:
             sender = make_sender(api, modes=["file_local"])
             sender.download_dir = tmp_path
             event = MockEvent()
@@ -232,7 +280,19 @@ class TestLocalFilename:
             assert ok
             kind, chain = event.sent[0]
             seg = chain[0]
-            assert seg.name == "晴天 - 周杰伦.flac"
+            assert seg.name == "晴天 - 周杰伦.mp3"
+
+    async def test_flac_content_keeps_flac_ext(self, tmp_path):
+        """内容确实是 FLAC 时保持 .flac（魔数优先于响应头里的 Content-Type）。"""
+        flac_bytes = b"fLaC" + bytes([0x80, 0, 0, 34]) + b"\x00" * 40
+        async with FakeUrlBackend([ok_url("flac")], audio_bytes=flac_bytes) as api:
+            sender = make_sender(api, modes=["file_local"])
+            sender.download_dir = tmp_path
+            event = MockEvent()
+            ok = await sender.send_track(event, make_track(), record_ctx={"user_id": "1"})
+            assert ok
+            kind, chain = event.sent[0]
+            assert chain[0].name == "晴天 - 周杰伦.flac"
 
 
 class TestPublicUrlRouting:

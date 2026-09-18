@@ -312,7 +312,17 @@ class TestPluginSmoke:
         from astrbot_plugin_moe_music.main import MoeMusicPlugin
 
         async with FakeBackend(search_result=[track_json(1), track_json(2)]) as api:
-            plugin = MoeMusicPlugin(context=None, config={"api_base_url": "", "api_key": "sk-test"})
+            plugin = MoeMusicPlugin(
+                context=None,
+                config={
+                    "api_base_url": "",
+                    "api_key": "sk-test",
+                    # 冒烟用例不开增强抓取（联网 / LLM 由 test_song_card_flow.py 覆盖）
+                    "song_card_year": False,
+                    "song_card_comment": False,
+                    "song_card_artist_bio": False,
+                },
+            )
             # 复用同一个 backend 的地址
             plugin.cfg.api_base_url = api._base_url
             plugin.api._base_url = api._base_url
