@@ -189,9 +189,10 @@
         "default": true
     },
     "llm_provider_id": {
-        "description": "获取信息用的模型（Provider ID）",
-        "hint": "留空 = 跟随系统当前对话模型；填写 Provider ID（WebUI →「对话模型」页面里该模型配置的 ID，如 openai/gpt-4o 的自定义 ID）则卡片信息固定用这个模型获取——建议挂一个便宜快速的模型，或选一个开启了联网搜索的",
+        "description": "获取信息用的模型",
+        "hint": "留空 = 跟随系统当前对话模型；选择一个模型后，卡片信息固定用它获取（联网搜索 agent 循环也用同一个）——建议选一个便宜快速的，或开启了联网搜索的",
         "type": "string",
+        "_special": "select_provider",
         "default": ""
     },
     "song_card_comment": {
