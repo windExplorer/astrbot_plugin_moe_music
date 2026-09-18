@@ -29,8 +29,15 @@ EXCLUDED_DIRS = {
     "node_modules",
     "webui",  # 前端源码（运行时只需构建产物 pages/moe-console/）
 }
-EXCLUDED_FILES = {"pyproject.toml", "uv.lock", ".python-version"}
-EXCLUDED_FILE_PATTERNS = (re.compile(r".*\.pyc$"), re.compile(r"^\.env"), re.compile(r"^\.gitignore$"))
+# cm_tmp.txt：`git commit -F` 用的提交信息临时文件（约定提交后即删）。
+# 它必须排除：曾出现「先写提交信息、再打包」的顺序，导致临时文件被打进安装包。
+EXCLUDED_FILES = {"pyproject.toml", "uv.lock", ".python-version", "cm_tmp.txt"}
+EXCLUDED_FILE_PATTERNS = (
+    re.compile(r".*\.pyc$"),
+    re.compile(r".*\.tmp$"),
+    re.compile(r"^\.env"),
+    re.compile(r"^\.gitignore$"),
+)
 REQUIRED_FILES = ("metadata.yaml", "main.py", "requirements.txt", "_conf_schema.json")
 
 
