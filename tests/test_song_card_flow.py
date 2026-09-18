@@ -49,13 +49,15 @@ class FakeEnricher:
         wy_id="186016",
         year=2014,
         intro="测试歌曲简介",
+        song_intro="测试歌曲简介",
         cover="http://h/wy-cover.jpg",
         comment=None,
         bio="测试歌手简介",
     ):
         self.wy_id = wy_id
         self.year = year
-        self.intro = intro
+        self.intro = intro  # fetch_wy_detail 返回的专辑文案（占位）
+        self.song_intro = song_intro  # LLM 生成的歌曲简介
         self.cover = cover
         self.comment = comment
         self.bio = bio
@@ -86,7 +88,7 @@ class FakeEnricher:
 
     async def fetch_song_intro(self, track, umo=None):
         self.intro_calls += 1
-        return self.intro or None
+        return self.song_intro or None
 
     async def fetch_hot_comment(self, wy_id):
         self.comment_calls += 1
@@ -282,6 +284,30 @@ class TestBackgroundEnrich:
             # 增强全关，但卡片封面仍需 wy 详情兜底（wy 音源无 pic 实现）
             assert (enricher.wy_calls, enricher.bio_calls) == (0, [])
             assert enricher.detail_calls == 1
+
+    async def test_intro_prefers_llm_over_album_text(self, tmp_path):
+        """简介以 LLM 生成的**歌曲**简介为主体：专辑文案（album）只是占位，会被升级替换。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path)
+            enricher.intro = "这是专辑的介绍"  # fetch_wy_detail 返回的 album.description
+            enricher.song_intro = "这是歌曲的介绍"  # LLM 生成的歌曲简介
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            row = await service.info_cache.get_song("wy:1")
+            assert row["intro"] == "这是歌曲的介绍"
+            assert row["intro_source"] == "llm"
+
+    async def test_intro_falls_back_to_album_text_without_llm(self, tmp_path):
+        """LLM 不可用 / 不认识这首歌：保留专辑文案占位，不让简介栏空着。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path)
+            enricher.intro = "这是专辑的介绍"
+            enricher.song_intro = None
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            row = await service.info_cache.get_song("wy:1")
+            assert row["intro"] == "这是专辑的介绍"
+            assert row["intro_source"] == "album"
 
     async def test_failed_fetch_not_retried_on_next_play(self, tmp_path):
         """抓不到也要记时间戳：否则每次点这首歌都会重打一遍外部接口。"""

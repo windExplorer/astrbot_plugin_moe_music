@@ -886,7 +886,8 @@ class MoeMusicService:
                 detail = await self.enricher.fetch_wy_detail(wy_id) or {}
                 url = str(detail.get("cover") or "")
                 if self.info_cache is not None:
-                    # 详情顺带拿到了年份/简介就一并入库，背景补齐任务无需再拉一次
+                    # 详情顺带拿到了年份/专辑文案就一并入库，背景补齐任务无需再拉一次；
+                    # 专辑文案只是简介的占位（intro_source=album），补齐时会被 LLM 升级
                     fields = {"cover_at": time.time()}
                     if url:
                         fields["cover_url"] = url
@@ -894,6 +895,7 @@ class MoeMusicService:
                         fields["year"] = detail["year"]
                     if detail.get("intro"):
                         fields["intro"] = detail["intro"]
+                        fields["intro_source"] = "album"
                     await self.info_cache.upsert_song(track.id, **fields)
         if not url:
             return None
@@ -966,30 +968,36 @@ class MoeMusicService:
         row = await self.info_cache.get_song(track.id)
         fields: dict = {"info_at": time.time()}
 
-        # 年份 + 歌曲简介 + 封面：一次网易云详情调用同时拿（简介缺 album 文案时 LLM 兜底）
-        # 注意：详情调用只由年份/简介的新鲜度驱动——封面缺失本身不允许绕过负缓存
-        # 反复拉接口（封面有独立的 cover_at 负缓存，见 _card_cover）。
+        # 年份 + 封面：一次网易云详情调用同时拿。注意：详情调用只由年份的新鲜度驱动，
+        # 封面缺失本身不允许绕过负缓存反复拉接口（封面有独立的 cover_at 负缓存，
+        # 见 _card_cover）。
         wy_detail: dict = {}
         if need_year or need_intro:
             wy_id = str(row.get("wy_id") or "")
             if not fresh(wy_id, row.get("mapped_at")):
                 wy_id = await self.enricher.resolve_wy_id(track) or ""
                 await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
-            detail_needed = not fresh(
-                row.get("year"), row.get("info_at")
-            ) or not fresh(row.get("intro"), row.get("info_at"))
-            if wy_id and detail_needed:
+            if wy_id and not fresh(row.get("year"), row.get("info_at")):
                 wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
             if wy_detail.get("cover"):
                 fields["cover_url"] = wy_detail["cover"]
             if need_year and not fresh(row.get("year"), row.get("info_at")) and wy_detail.get("year"):
                 fields["year"] = wy_detail["year"]
-            if need_intro and not fresh(row.get("intro"), row.get("info_at")):
-                intro = wy_detail.get("intro")
-                if not intro:
-                    intro = await self.enricher.fetch_song_intro(track, umo)
-                if intro:
-                    fields["intro"] = intro
+
+        # 歌曲简介：以 LLM 生成的**歌曲**简介为主体。专辑文案（intro_source=album）只是
+        # 首发卡片路径顺手存的占位文案，会在补齐时被 LLM 版本升级替换；LLM 不可用 /
+        # 不认识这首歌时才保留专辑文案，不让简介栏空着。
+        if (
+            need_intro
+            and (not row.get("intro") or row.get("intro_source") != "llm")
+            and not fresh(None, row.get("info_at"))
+        ):
+            intro = await self.enricher.fetch_song_intro(track, umo)
+            if not intro and not row.get("intro"):
+                intro = wy_detail.get("intro")  # LLM 没给：专辑文案兜底（仅当本次拉到详情）
+            if intro:
+                fields["intro"] = intro
+                fields["intro_source"] = "album" if intro == wy_detail.get("intro") else "llm"
 
         # 热评按曲目所在平台直取（wy/kw/kg），其余平台回退网易云同曲映射
         if need_comment and not fresh(row.get("hot_comment"), row.get("info_at")):

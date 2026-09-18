@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS song_meta (
     track_id          TEXT PRIMARY KEY,   -- 后端曲目 id，如 wy:186016
     wy_id             TEXT,               -- 映射到的网易云曲目 id（空 = 尚未成功映射）
     year              INTEGER,            -- 发行年份（空/0 = 未知）
-    intro             TEXT,               -- 歌曲简介（网易云专辑简介或 LLM 生成）
+    intro             TEXT,               -- 歌曲简介（LLM 生成；LLM 不可用时暂存专辑文案）
+    intro_source      TEXT,               -- 简介来源：llm=歌曲简介（最终）/ album=专辑文案（占位）
     cover_url         TEXT,               -- 封面直链（后端 wy 无 pic 实现时由此补）
     cover_at          REAL,               -- 封面「尝试」完成时间（含失败，负缓存用）
     hot_comment       TEXT,               -- 热评第一条正文
@@ -61,6 +62,7 @@ _SONG_COLUMNS = {
     "wy_id",
     "year",
     "intro",
+    "intro_source",
     "cover_url",
     "cover_at",
     "hot_comment",

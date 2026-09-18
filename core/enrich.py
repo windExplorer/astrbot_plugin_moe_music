@@ -203,7 +203,8 @@ class Enricher:
         """取网易云歌曲详情：``{"year", "intro", "cover"}``（缺哪项就没有哪个键）。
 
         - ``year``：``album.publishTime``（毫秒时间戳）；
-        - ``intro``：``album.description``（常带 HTML，剥离后作「歌曲简介」首选来源）；
+        - ``intro``：``album.description``（常带 HTML，剥离后作简介的**占位/兜底**文案；
+          卡片简介以 LLM 生成的歌曲简介为主体，见 ``SongService._enrich_song``）；
         - ``cover``：``album.picUrl``——后端 wy 音源没有 pic 实现且详情不带 picUrl，
           这是网易云歌曲封面的主要来源。
         """
