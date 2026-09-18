@@ -450,6 +450,34 @@ class TestPluginShareHook:
             assert not event.stopped and event.sent == []
             assert api.calls == []
 
+    async def test_llm_provider_override(self):
+        """llm_provider_id 配置后卡片信息固定用该模型；ID 无效回退系统默认。"""
+        from types import SimpleNamespace
+
+        class _FakeContext:
+            def __init__(self, providers):
+                self._providers = providers
+
+            async def get_using_provider_async(self, umo=None):
+                return None  # 系统没有默认模型
+
+            def get_all_providers(self):
+                return []
+
+            def get_provider_by_id(self, provider_id):
+                return self._providers.get(provider_id)
+
+        custom = SimpleNamespace(name="custom-model")
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            plugin = self._plugin(api, {"llm_provider_id": "custom"})
+            plugin.context = _FakeContext({"custom": custom})
+            assert await plugin._llm_provider_for("umo") is custom
+
+            # ID 填错：回退系统默认（这里默认也是 None，但不应抛异常）
+            plugin2 = self._plugin(api, {"llm_provider_id": "not-exist"})
+            plugin2.context = _FakeContext({})
+            assert await plugin2._llm_provider_for("umo") is None
+
     async def test_disabled_by_config(self):
         async with FakeBackend(search_result=[track_json(1)]) as api:
             plugin = self._plugin(api, {"share_auto_play": False})

@@ -139,13 +139,27 @@ class MoeMusicPlugin(Star):
             return False
 
     async def _llm_provider_for(self, umo: str | None = None):
-        """取可用的对话模型（简介生成用）；没有可用模型时返回 None。
+        """取获取卡片信息用的对话模型；没有可用模型时返回 None。
 
-        优先当前会话使用的模型；会话没有指定（或开了会话隔离但没选过）时退回
-        全局任意一个 Chat Provider——卡片简介不值得因为「没选模型」而缺失。
+        配置了 ``llm_provider_id`` 时固定用该模型（推荐挂便宜快速的，或开了
+        联网搜索的）；ID 无效时记警告并退回系统默认。留空则跟随系统：
+        优先当前会话使用的模型，会话没有指定时退回全局任意一个 Chat Provider。
         """
         if self.context is None:
             return None
+        provider_id = self.cfg.llm_provider_id
+        if provider_id:
+            try:
+                provider = self.context.get_provider_by_id(provider_id)
+            except Exception as e:
+                logger.debug(f"[萌音点歌] 按 ID 获取模型失败：{type(e).__name__}: {e}")
+                provider = None
+            if provider is not None:
+                return provider
+            logger.warning(
+                f"[萌音点歌] 找不到模型 ID「{provider_id}」（WebUI → 对话模型 页查看 ID），"
+                "已回退为系统当前对话模型"
+            )
         try:
             provider = await self.context.get_using_provider_async(umo)
         except Exception as e:
@@ -175,10 +189,13 @@ class MoeMusicPlugin(Star):
         toolset = await self._web_search_toolset(event, umo)
         if toolset is not None and umo:
             try:
-                provider_id = await self.context.get_current_chat_provider_id(umo)
+                # agent 循环按 ID 取模型：配置了专用模型时用它，否则用会话当前模型
+                chat_provider_id = self.cfg.llm_provider_id or (
+                    await self.context.get_current_chat_provider_id(umo)
+                )
                 resp = await self.context.tool_loop_agent(
                     event=event,
-                    chat_provider_id=provider_id,
+                    chat_provider_id=chat_provider_id,
                     tools=toolset,
                     prompt=prompt,
                     system_prompt=system_prompt,

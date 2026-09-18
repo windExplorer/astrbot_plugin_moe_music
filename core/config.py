@@ -140,6 +140,7 @@ class PluginConfig:
     song_card_year: bool = True  # 渲染：卡片显示发行年份（数据由 LLM 总开关获取）
     song_card_intro: bool = True  # 渲染：卡片显示歌曲简介（数据由 LLM 总开关获取）
     song_card_llm_sync: bool = True  # 信息获取总开关：LLM 一次调用取简介/歌手简介/年份兜底
+    llm_provider_id: str = ""  # 卡片信息用的模型 ID；空 = 跟随系统当前对话模型
     song_card_comment: bool = True  # 补热评第一条（wy/kw/kg 直取，失败静默跳过）
     song_card_artist_bio: bool = True  # 用 LLM 生成歌手简介（无可用模型时自动跳过）
     song_card_repeat_sec: int = 300  # 同会话同一首歌在此秒数内不重复发卡片（0 = 每次都发）
@@ -224,6 +225,7 @@ class PluginConfig:
             song_card_year=bool(config.get("song_card_year", True)),
             song_card_intro=bool(config.get("song_card_intro", True)),
             song_card_llm_sync=bool(config.get("song_card_llm_sync", True)),
+            llm_provider_id=str(config.get("llm_provider_id", "") or "").strip(),
             song_card_comment=bool(config.get("song_card_comment", True)),
             song_card_artist_bio=bool(config.get("song_card_artist_bio", True)),
             song_card_repeat_sec=_int_opt("song_card_repeat_sec", 300, 0, 3600),

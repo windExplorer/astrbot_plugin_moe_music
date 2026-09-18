@@ -188,6 +188,12 @@
         "type": "bool",
         "default": true
     },
+    "llm_provider_id": {
+        "description": "获取信息用的模型（Provider ID）",
+        "hint": "留空 = 跟随系统当前对话模型；填写 Provider ID（WebUI →「对话模型」页面里该模型配置的 ID，如 openai/gpt-4o 的自定义 ID）则卡片信息固定用这个模型获取——建议挂一个便宜快速的模型，或选一个开启了联网搜索的",
+        "type": "string",
+        "default": ""
+    },
     "song_card_comment": {
         "description": "卡片补充热门评论",
         "hint": "取热评第一条画进卡片（网易云 / 酷我 / 酷狗按曲目所在平台直取，其余平台回退网易云同曲映射），并标注来源与点赞数。接口可能被限流，失败时静默跳过。注意：热评在后台异步抓取，每首歌第一次点只有基础卡片，第二次起才有热评",

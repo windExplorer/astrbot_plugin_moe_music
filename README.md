@@ -43,6 +43,7 @@
 | `share_quality` | 分享识别取链音质（超 Key 上限自动收敛） | `320k` |
 | `song_card_enable` | 歌曲信息卡片（点歌后先发卡片再发音频） | `true` |
 | `song_card_llm_sync` | **用 LLM 获取卡片信息（总开关）**：一次调用同时取歌曲简介+歌手简介+年份兜底，会话开启联网搜索时自动搜索核实 | `true` |
+| `llm_provider_id` | 获取信息用的模型 Provider ID（空 = 跟随系统当前对话模型） | 空 |
 | `song_card_year` | 渲染：卡片显示发行年份（网易云接口优先，LLM 兜底） | `true` |
 | `song_card_intro` | 渲染：卡片显示歌曲简介 | `true` |
 | `song_card_artist_bio` | 渲染：卡片显示歌手简介（与歌曲简介同一次 LLM 调用生成） | `true` |
