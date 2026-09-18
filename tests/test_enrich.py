@@ -83,8 +83,12 @@ async def wy_server(monkeypatch):
             {"content": "酷狗热评", "user_name": "kg用户", "like": {"likenum": 55}}
         ]},
         "kg_status": 200,
+        "artist": {"artist": {"briefDesc": "周杰伦，华语流行男歌手。"}},
     }
     app = web.Application()
+
+    async def artist_intro(request):
+        return web.json_response(state["artist"])
 
     async def detail(request):
         if state["detail_status"] != 200:
@@ -107,6 +111,7 @@ async def wy_server(monkeypatch):
         return web.json_response(state["kg"])
 
     app.router.add_get("/api/song/detail/", detail)
+    app.router.add_get("/api/artist/{aid}", artist_intro)
     app.router.add_get("/api/v1/resource/comments/{rid}", comments)
     app.router.add_get("/com.s", kw_comments)
     app.router.add_get("/r/v1/rank/topliked", kg_comments)
@@ -127,28 +132,52 @@ class TestFetchYear:
     async def test_parses_millisecond_timestamp(self, wy_server):
         assert await make_enricher().fetch_year("186016") == 2003
 
-    async def test_detail_returns_year_and_cover(self, wy_server):
-        """网易云详情一次拿年份和封面（专辑文案不再作为简介来源）。"""
+    async def test_detail_returns_year_cover_artist_id(self, wy_server):
+        """网易云详情一次拿年份、封面和主唱歌手 id（歌手简介直取用）。"""
         wy_server["detail"] = {
             "songs": [
                 {
                     "album": {
                         "publishTime": 1062864000000,
-                        "description": "专辑宣传文案，不再使用",
                         "picUrl": "https://p.example/cover.jpg",
-                    }
+                    },
+                    "artists": [{"id": 6452, "name": "周杰伦"}],
                 }
             ]
         }
         detail = await make_enricher().fetch_wy_detail("1")
         assert detail["year"] == 2003
         assert detail["cover"] == "https://p.example/cover.jpg"
+        assert detail["artist_id"] == "6452"
         assert "intro" not in detail
+
+    async def test_detail_weapi_short_keys_also_supported(self, wy_server):
+        """weapi 缩写格式（ar / al）同样能解析出歌手 id。"""
+        wy_server["detail"] = {
+            "songs": [
+                {"al": {"publishTime": 1062864000000}, "ar": [{"id": 6452}]}
+            ]
+        }
+        detail = await make_enricher().fetch_wy_detail("1")
+        assert detail["year"] == 2003 and detail["artist_id"] == "6452"
 
     async def test_detail_without_cover(self, wy_server):
         wy_server["detail"] = {"songs": [{"album": {"publishTime": 1062864000000}}]}
         detail = await make_enricher().fetch_wy_detail("1")
         assert detail["year"] == 2003 and "cover" not in detail
+
+    async def test_artist_intro_from_public_api(self, wy_server):
+        """网易云歌手简介公开接口：briefDesc 清理后返回；没有则 None。"""
+        wy_server["artist"] = {
+            "artist": {"briefDesc": "周杰伦，华语流行男歌手。\n代表作《晴天》。"}
+        }
+        bio = await make_enricher().fetch_artist_intro_wy("6452")
+        assert bio is not None and bio.startswith("周杰伦")
+        assert "代表作" in bio
+
+        wy_server["artist"] = {"artist": {"briefDesc": ""}}
+        assert await make_enricher().fetch_artist_intro_wy("6452") is None
+        assert await make_enricher().fetch_artist_intro_wy("") is None
 
     async def test_parses_second_timestamp(self, wy_server):
         wy_server["detail"] = {"songs": [{"publishTime": int(time.time())}]}

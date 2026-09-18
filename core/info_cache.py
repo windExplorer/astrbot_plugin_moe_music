@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS song_meta (
     year              INTEGER,            -- 发行年份（空/0 = 未知）
     intro             TEXT,               -- 歌曲简介（LLM 生成；LLM 不可用时暂存专辑文案）
     intro_source      TEXT,               -- 简介来源：llm=歌曲简介（最终）/ album=专辑文案（占位）
+    artist_id         TEXT,               -- 主唱歌手的网易云 id（直取歌手简介用）
     cover_url         TEXT,               -- 封面直链（后端 wy 无 pic 实现时由此补）
     cover_at          REAL,               -- 封面「尝试」完成时间（含失败，负缓存用）
     hot_comment       TEXT,               -- 热评第一条正文
@@ -64,6 +65,7 @@ _SONG_COLUMNS = {
     "year",
     "intro",
     "intro_source",
+    "artist_id",
     "cover_url",
     "cover_at",
     "hot_comment",

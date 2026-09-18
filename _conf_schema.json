@@ -213,6 +213,12 @@
         "type": "int",
         "default": 0
     },
+    "llm_web_search": {
+        "description": "LLM 获取信息时允许联网搜索",
+        "hint": "开启后 LLM 会先调用 Web Searcher 搜索核实再作答（更准，但要多几轮、慢一些）；关闭则单轮直调模型（更快，冷门歌曲可能查不到）。歌手简介不受此开关影响——它优先走网易云接口直取",
+        "type": "bool",
+        "default": true
+    },
     "song_card_repeat_sec": {
         "description": "重复卡片间隔（秒）",
         "hint": "同一会话内重复点同一首歌，在此时间窗内不重复发卡片（歌照常发）；填 0 表示每次都发",

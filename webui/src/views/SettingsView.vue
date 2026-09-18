@@ -55,6 +55,7 @@ const GROUPS: Array<{ title: string; keys: string[] }> = [
       "song_card_llm_sync",
       "llm_provider_id",
       "info_retry_days",
+      "llm_web_search",
       "song_card_comment",
       "song_card_artist_bio",
       "song_card_repeat_sec",

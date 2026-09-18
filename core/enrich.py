@@ -206,11 +206,12 @@ class Enricher:
     # ============ 2. 网易云歌曲详情（发行年份 + 专辑简介 + 封面） ============
 
     async def fetch_wy_detail(self, wy_id: str) -> dict:
-        """取网易云歌曲详情：``{"year", "cover"}``（缺哪项就没有哪个键）。
+        """取网易云歌曲详情：``{"year", "cover", "artist_id"}``（缺哪项就没有哪个键）。
 
         - ``year``：``album.publishTime``（毫秒时间戳）——事实数据，优先于 LLM；
         - ``cover``：``album.picUrl``——后端 wy 音源没有 pic 实现且详情不带 picUrl，
-          这是网易云歌曲封面的主要来源。
+          这是网易云歌曲封面的主要来源；
+        - ``artist_id``：主唱歌手的网易云 id，用于直取歌手简介（``fetch_artist_intro_wy``）。
         """
         if not wy_id:
             return {}
@@ -222,16 +223,44 @@ class Enricher:
             return {}
         song = songs[0] if isinstance(songs[0], dict) else {}
         album = song.get("album") if isinstance(song.get("album"), dict) else {}
+        short_album = song.get("al") if isinstance(song.get("al"), dict) else {}
         detail: dict = {}
-        for raw in (album.get("publishTime"), song.get("publishTime")):
+        for raw in (
+            album.get("publishTime"),
+            short_album.get("publishTime"),
+            song.get("publishTime"),
+        ):
             year = _year_of(raw)
             if year:
                 detail["year"] = year
                 break
-        cover = str(album.get("picUrl") or song.get("picUrl") or "").strip()
+        cover = str(
+            album.get("picUrl") or short_album.get("picUrl") or song.get("picUrl") or ""
+        ).strip()
         if cover.startswith("http"):
             detail["cover"] = cover
+        # 歌手 id：公开接口用完整字段 artists，weapi 缩写格式用 ar
+        artists = song.get("artists") or song.get("ar") or []
+        if isinstance(artists, list) and artists and isinstance(artists[0], dict):
+            artist_id = str(artists[0].get("id") or "")
+            if artist_id.isdigit():
+                detail["artist_id"] = artist_id
         return detail
+
+    async def fetch_artist_intro_wy(self, artist_id: str) -> str | None:
+        """网易云歌手简介（公开接口，事实数据）：``artist.briefDesc`` 一段。
+
+        比 LLM 快且不会编造；简介常是长文，截断到卡片能展示的长度。
+        取不到返回 None（交给 LLM 兜底）。
+        """
+        if not artist_id:
+            return None
+        data = await self._get_json(f"/api/artist/{artist_id}")
+        if not data:
+            return None
+        artist = data.get("artist") if isinstance(data.get("artist"), dict) else {}
+        desc = _clean_text(_strip_html(str(artist.get("briefDesc") or "")), BIO_MAX_CHARS)
+        return desc or None
 
     async def fetch_year(self, wy_id: str) -> int | None:
         """取发行年份（``fetch_wy_detail`` 的便捷封装，兼容旧调用）。"""

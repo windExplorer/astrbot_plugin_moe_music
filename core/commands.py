@@ -965,12 +965,14 @@ class MoeMusicService:
                 detail = await self.enricher.fetch_wy_detail(wy_id) or {}
                 url = str(detail.get("cover") or "")
                 if self.info_cache is not None:
-                    # 详情顺带拿到了年份就一并入库，补齐任务无需再为年份拉一次详情
+                    # 详情顺带拿到了年份/歌手 id 就一并入库，补齐任务无需再拉一次详情
                     fields = {"cover_at": time.time()}
                     if url:
                         fields["cover_url"] = url
                     if detail.get("year"):
                         fields["year"] = detail["year"]
+                    if detail.get("artist_id"):
+                        fields["artist_id"] = detail["artist_id"]
                     await self.info_cache.upsert_song(track.id, **fields)
         if not url:
             return None
@@ -1116,23 +1118,7 @@ class MoeMusicService:
         fields: dict = {"info_at": time.time()}
         artist_fields: dict = {}
 
-        # 1) 年份：网易云详情（事实数据，不走 LLM）；封面缺失顺带补。
-        #    详情调用只由年份的新鲜度驱动，封面缺失本身不允许绕过负缓存反复拉
-        #    接口（封面有独立的 cover_at 负缓存，见 _card_cover）。
-        if need_year:
-            wy_id = str(row.get("wy_id") or "")
-            if not fresh(wy_id, row.get("mapped_at"), self._retry_ttl):
-                wy_id = await self.enricher.resolve_wy_id(track) or ""
-                await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
-            if wy_id and not fresh(row.get("year"), row.get("info_at"), self._retry_ttl):
-                wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
-                if wy_detail.get("cover"):
-                    fields["cover_url"] = wy_detail["cover"]
-                if wy_detail.get("year"):
-                    fields["year"] = wy_detail["year"]
-
-        # 2) LLM 一次调用：歌曲简介 + 歌手简介（+ 网易云没给时年份兜底）。
-        #    拿不到的字段不编造；负缓存（info_at / attempt_at）避免反复调。
+        # 待补项先算好（只依赖缓存），决定后面要不要打接口 / 调 LLM
         intro_pending = (
             need_intro
             and (not row.get("intro") or row.get("intro_source") != "llm")
@@ -1141,24 +1127,58 @@ class MoeMusicService:
         bio_pending = need_bio and not fresh(
             artist.get("bio"), artist.get("attempt_at"), self._retry_ttl
         )
-        year_pending = need_year and not fields.get("year") and not fresh(
+        year_pending = need_year and not fresh(row.get("year"), row.get("info_at"), self._retry_ttl)
+
+        # 1) 网易云详情（事实数据，不走 LLM）：年份 / 封面 / 歌手 id（歌手简介直取用）。
+        #    详情调用由「年份待补或歌手简介待补」驱动；封面缺失另有独立负缓存
+        #    （cover_at，见 _card_cover），不允许绕过它反复拉接口。
+        artist_id = str(row.get("artist_id") or "")
+        if need_year or bio_pending:
+            wy_id = str(row.get("wy_id") or "")
+            if not fresh(wy_id, row.get("mapped_at"), self._retry_ttl):
+                wy_id = await self.enricher.resolve_wy_id(track) or ""
+                await self.info_cache.upsert_song(track.id, wy_id=wy_id, mapped_at=time.time())
+            detail_needed = (
+                (need_year and wy_id and year_pending)
+                or (bio_pending and wy_id and not artist.get("bio") and not artist_id)
+            )
+            if wy_id and detail_needed:
+                wy_detail = await self.enricher.fetch_wy_detail(wy_id) or {}
+                if wy_detail.get("cover"):
+                    fields["cover_url"] = wy_detail["cover"]
+                if wy_detail.get("year"):
+                    fields["year"] = wy_detail["year"]
+                if wy_detail.get("artist_id"):
+                    artist_id = wy_detail["artist_id"]
+                    fields["artist_id"] = artist_id
+
+        # 2) 歌手简介：网易云公开接口直取（事实数据、快），拿不到再交给 LLM 兜底。
+        if bio_pending and artist_id and not artist.get("bio"):
+            bio = await self.enricher.fetch_artist_intro_wy(artist_id)
+            if bio:
+                artist_fields.update({"bio": bio, "source": "wy", "attempt_at": time.time()})
+        llm_bio_pending = bio_pending and not artist_fields.get("bio")
+
+        # 3) LLM 一次调用：歌曲简介（+ 年份兜底 + 歌手简介兜底）。
+        #    拿不到的字段不编造；负缓存（info_at / attempt_at）避免反复调。
+        llm_year_pending = need_year and not fields.get("year") and not fresh(
             row.get("year"), row.get("info_at"), self._retry_ttl
         )
-        if self.enricher is not None and (intro_pending or bio_pending or year_pending):
+        if self.enricher is not None and (intro_pending or llm_bio_pending or llm_year_pending):
             data = await self.enricher.fetch_card_info(
                 track,
-                need_year=year_pending,
+                need_year=llm_year_pending,
                 need_intro=intro_pending,
-                need_bio=bio_pending,
+                need_bio=llm_bio_pending,
                 event=event,
                 umo=umo,
             ) or {}
             if intro_pending and data.get("intro"):
                 fields["intro"] = data["intro"]
                 fields["intro_source"] = "llm"
-            if year_pending and data.get("year") and not fields.get("year"):
+            if llm_year_pending and data.get("year") and not fields.get("year"):
                 fields["year"] = data["year"]
-            if bio_pending:
+            if llm_bio_pending:
                 artist_fields["attempt_at"] = time.time()
                 if data.get("artist_bio"):
                     artist_fields["bio"] = data["artist_bio"]

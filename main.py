@@ -186,7 +186,9 @@ class MoeMusicPlugin(Star):
         prov = await self._llm_provider_for(umo)
         if prov is None:
             return None
-        toolset = await self._web_search_toolset(event, umo)
+        toolset = None
+        if self.cfg.llm_web_search:
+            toolset = await self._web_search_toolset(event, umo)
         if toolset is not None and umo:
             try:
                 # agent 循环按 ID 取模型：配置了专用模型时用它，否则用会话当前模型

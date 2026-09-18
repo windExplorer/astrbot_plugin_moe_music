@@ -48,20 +48,25 @@ class FakeEnricher:
         self,
         wy_id="186016",
         year=2014,
+        artist_id="887",
         song_intro="测试歌曲简介",
         cover="http://h/wy-cover.jpg",
         comment=None,
         bio="测试歌手简介",
+        api_bio=None,
     ):
         self.wy_id = wy_id
         self.year = year  # 网易云详情里的发行年份
+        self.artist_id = artist_id  # 详情里的主唱歌手网易云 id
         self.song_intro = song_intro  # LLM 生成的歌曲简介
         self.cover = cover
         self.comment = comment
         self.bio = bio  # LLM 生成的歌手简介
+        self.api_bio = api_bio  # 网易云接口直取的歌手简介（默认无 → LLM 兜底）
         self.wy_calls = 0
         self.detail_calls = 0
         self.llm_calls = 0
+        self.artist_api_calls = 0
         self.comment_calls = 0
 
     async def resolve_wy_id(self, track):
@@ -75,7 +80,13 @@ class FakeEnricher:
             detail["year"] = self.year
         if self.cover:
             detail["cover"] = self.cover
+        if self.artist_id:
+            detail["artist_id"] = self.artist_id
         return detail
+
+    async def fetch_artist_intro_wy(self, artist_id):
+        self.artist_api_calls += 1
+        return self.api_bio
 
     async def fetch_card_info(
         self, track, need_year=False, need_intro=False, need_bio=False, event=None, umo=None
@@ -359,6 +370,35 @@ class TestBackgroundEnrich:
             await drain_background(service)
             assert enricher.llm_calls == 2  # 重新尝试了一次
             assert enricher.detail_calls >= 2  # 年份/封面详情也重试了
+
+    async def test_artist_bio_from_api_preferred_over_llm(self, tmp_path):
+        """歌手简介优先走网易云接口（事实数据、快）：成功后不再为它调 LLM。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path)
+            enricher.api_bio = "网易云的歌手简介"
+            enricher.bio = "LLM 的歌手简介"
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            artist = await service.info_cache.get_artist("歌手1")
+            assert artist["bio"] == "网易云的歌手简介"
+            assert artist["source"] == "wy"
+            row = await service.info_cache.get_song("wy:1")
+            assert row["artist_id"] == "887"  # 详情顺带缓存歌手 id
+            # LLM 只为歌曲简介而调，请求里不带歌手简介字段（无法直接断言字段，
+            # 但 LLM 调用次数仍为 1 次：简介一次搞定）
+            assert enricher.llm_calls == 1
+            assert enricher.artist_api_calls == 1
+
+    async def test_artist_bio_falls_back_to_llm_when_api_empty(self, tmp_path):
+        """网易云接口没给歌手简介：回退 LLM 兜底，来源标记 llm。"""
+        async with FakeBackend(search_result=[track_json(1)]) as api:
+            service, _, enricher = make_service(api, tmp_path)
+            enricher.api_bio = None
+            await service.handle_song_request(MockEvent(), "晴天", index_hint=1)
+            await drain_background(service)
+            artist = await service.info_cache.get_artist("歌手1")
+            assert artist["bio"] == "测试歌手简介"
+            assert artist["source"] == "llm"
 
     async def test_llm_intro_stored_as_llm_source(self, tmp_path):
         """歌曲简介来自 LLM（intro_source=llm），一次调用同时覆盖歌手简介。"""
